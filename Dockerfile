@@ -11,15 +11,17 @@ RUN pip install --upgrade pip && \
     pip install -r requirements.txt
 
 COPY slack_bot.py .
+COPY streamlit_app.py .
 COPY claude_orchestrator.py .
 COPY dynamodb_database.py .
 COPY servers/ ./servers/
 
-# Add environment variables from .env file  
-RUN export $(cat .env | xargs)  
+# API keys are not baked into the image. Pass them at runtime, e.g.
+#   docker run --env-file .env -p 8501:8501 travelgenie
+# or via ECS task environment variables / AWS Secrets Manager.
 
-# Copy .env 
-# COPY .env .
+EXPOSE 8501
 
-# Run the Slack bot
-CMD ["python", "slack_bot.py"]
+# Default: run the Streamlit web app.
+# To run the Slack bot instead: docker run --env-file .env travelgenie python slack_bot.py
+CMD ["streamlit", "run", "streamlit_app.py", "--server.address=0.0.0.0", "--server.port=8501"]

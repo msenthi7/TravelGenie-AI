@@ -10,7 +10,7 @@ python-dotenv>=1.1.0
 
 # MCP Framework (required by all servers)
 fastmcp>=2.5.1
-mcp>=1.9.1
+mcp>=1.9.1,<2
 
 # HTTP requests (used by all servers)
 requests>=2.32.3

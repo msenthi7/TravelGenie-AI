@@ -46,6 +46,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
+@st.cache_resource
+def get_server_keys():
+    # Snapshot keys set by the host (env vars / Streamlit secrets) once per process,
+    # before any visitor-entered key is written into os.environ.
+    return {
+        "SERPAPI_KEY": os.getenv("SERPAPI_KEY", ""),
+        "ANTHROPIC_API_KEY": os.getenv("ANTHROPIC_API_KEY", ""),
+    }
+
+SERVER_KEYS = get_server_keys()
+
 if 'results' not in st.session_state:
     st.session_state.results = {}
 if 'api_keys_set' not in st.session_state:
@@ -57,19 +68,22 @@ st.markdown("**Orchestrate 7 MCP servers** to create comprehensive travel plans"
 with st.sidebar:
     st.header("API Configuration")
     
-    serpapi_key = st.text_input(
-        "SerpAPI Key",
-        value=os.getenv("SERPAPI_KEY", ""),
-        type="password",
-        help="Required for flights, hotels, events, and finance servers"
-    )
-    
+    # Never pass a server-side key to a widget: its value is sent to the browser.
+    if SERVER_KEYS["SERPAPI_KEY"]:
+        serpapi_key = SERVER_KEYS["SERPAPI_KEY"]
+    else:
+        serpapi_key = st.text_input(
+            "SerpAPI Key",
+            type="password",
+            help="Required for flights, hotels, events, and finance servers"
+        )
+
     st.info("Weather Server uses Open-Meteo API (free, no API key required)")
-    
+
     if serpapi_key:
         os.environ["SERPAPI_KEY"] = serpapi_key
         st.session_state.api_keys_set = True
-        st.success("SerpAPI key set")
+        st.success("SerpAPI key configured" if SERVER_KEYS["SERPAPI_KEY"] else "SerpAPI key set")
     else:
         st.warning("SerpAPI key required")
         st.session_state.api_keys_set = False
@@ -496,12 +510,14 @@ with tab2:
         st.error("Anthropic SDK not installed. Please install it: `pip install anthropic`")
         st.stop()
     
-    anthropic_api_key = st.sidebar.text_input(
-        "Anthropic API Key",
-        value=os.getenv("ANTHROPIC_API_KEY", ""),
-        type="password",
-        help="Get your API key from https://console.anthropic.com/"
-    )
+    if SERVER_KEYS["ANTHROPIC_API_KEY"]:
+        anthropic_api_key = SERVER_KEYS["ANTHROPIC_API_KEY"]
+    else:
+        anthropic_api_key = st.sidebar.text_input(
+            "Anthropic API Key",
+            type="password",
+            help="Get your API key from https://console.anthropic.com/"
+        )
     
     if not anthropic_api_key:
         st.warning("Please enter your Anthropic API key in the sidebar to use Claude chat.")
