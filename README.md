@@ -14,7 +14,7 @@
 
 Ever tried planning a trip and spent hours jumping between Google Flights, Booking.com, checking weather, looking up events, and trying to figure out if you can afford it all? Yeah, me too. That's why I built TravelGenie.
 
-Just ask it something like: *"Plan a trip to Banff, Alberta from Reston, Virginia, June 7-14, 2025. Budget $5000. We like hiking, museums, and dining."*
+Just ask it something like: *"Plan a trip to Banff, Alberta from Reston, Virginia, December 12-15. Budget $2000. We like hiking and food."*
 
 And TravelGenie will:
 - Find flights and hotels that fit your budget
@@ -25,6 +25,23 @@ And TravelGenie will:
 - Create a day-by-day itinerary with a budget breakdown
 
 **No manual searching. Just one request, and you get a complete plan.**
+
+---
+
+## Security
+
+TravelGenie is built and reviewed with a security-first approach for LLM agents. Model output is treated as untrusted input, secrets never reach the model, and all tools are read-only.
+
+| | |
+|---|---|
+| **Threat model** | STRIDE + OWASP Top 10 for LLM Applications (2025) |
+| **Findings** | 20 found and fixed, including an API key leak through error messages, path traversal, SSRF, a hard-coded credential, and unbounded consumption |
+| **Controls** | Secret redaction, tool-argument validation, URL allow-listing, rate limiting, timeouts, non-root container, least-privilege IAM, KMS encryption |
+| **CI gates** | Bandit · pip-audit · Gitleaks · cfn-lint |
+
+- 📄 [Security assessment](docs/SECURITY_ASSESSMENT.md): threat model, findings, residual risks
+- 🏗️ [Architecture](docs/ARCHITECTURE.md): components, request lifecycle, tool inventory, performance
+- 🔐 [Security policy](SECURITY.md): how to report a vulnerability
 
 ---
 
@@ -139,8 +156,8 @@ from claude_orchestrator import execute_tool
 flights = execute_tool("search_flights",
     departure_id="IAD",
     arrival_id="YYC",
-    outbound_date="2025-06-07",
-    return_date="2025-06-14",
+    outbound_date="2026-12-12",
+    return_date="2026-12-15",
     adults=2
 )
 
@@ -316,7 +333,7 @@ Contributions are welcome! There's always room for improvement. Some ideas:
 ## Support
 
 If you run into issues:
-- **GitHub Issues**: [github.com/kautilyaa/TravelGenie/issues](https://github.com/kautilyaa/TravelGenie/issues)
+- **GitHub Issues**: [github.com/msenthi7/TravelGenie-AI/issues](https://github.com/msenthi7/TravelGenie-AI/issues)
 - **API Docs**: 
   - [SerpAPI](https://serpapi.com/)
   - [Anthropic](https://docs.anthropic.com/)

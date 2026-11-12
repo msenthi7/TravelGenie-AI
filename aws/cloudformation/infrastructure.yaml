@@ -35,7 +35,6 @@ Parameters:
     Type: String
     NoEcho: true
     Description: SerpAPI Key for flights, hotels, events
-    Default: '32d027365109aa1dc90ba12b38caf731ba02cdabb1adacd75080467f4ed02f53'
   
   ContainerCpu:
     Type: Number
@@ -157,9 +156,11 @@ Resources:
       GroupDescription: Security group for ECS tasks
       VpcId: !Ref VPC
       SecurityGroupEgress:
-        - IpProtocol: -1
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
           CidrIp: 0.0.0.0/0
-          Description: Allow all outbound traffic
+          Description: HTTPS only (Slack, Anthropic, SerpAPI, weather, maps, ECR, AWS APIs)
       Tags:
         - Key: Name
           Value: !Sub '${ProjectName}-${Environment}-ecs-sg'
@@ -171,6 +172,13 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub '${ProjectName}-${Environment}-data-${AWS::AccountId}'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+            BucketKeyEnabled: true
+      VersioningConfiguration:
+        Status: Enabled
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -201,6 +209,10 @@ Resources:
     Properties:
       TableName: !Sub '${ProjectName}-${Environment}-chat-sessions'
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: session_id
           AttributeType: S
@@ -216,6 +228,10 @@ Resources:
     Properties:
       TableName: !Sub '${ProjectName}-${Environment}-messages'
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: id
           AttributeType: S
@@ -244,6 +260,10 @@ Resources:
     Properties:
       TableName: !Sub '${ProjectName}-${Environment}-tool-calls'
       BillingMode: PAY_PER_REQUEST
+      SSESpecification:
+        SSEEnabled: true
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
       AttributeDefinitions:
         - AttributeName: id
           AttributeType: S
@@ -391,10 +411,9 @@ Resources:
             Statement:
               - Effect: Allow
                 Action:
-                  - logs:CreateLogGroup
                   - logs:CreateLogStream
                   - logs:PutLogEvents
-                Resource: '*'
+                Resource: !Sub '${CloudWatchLogGroup.Arn}:*'
       Tags:
         - Key: Name
           Value: !Sub '${ProjectName}-${Environment}-ecs-task-role'

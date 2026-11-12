@@ -7,14 +7,20 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install the specified packages
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
 COPY slack_bot.py .
 COPY streamlit_app.py .
 COPY claude_orchestrator.py .
 COPY dynamodb_database.py .
 COPY servers/ ./servers/
+
+# Run as an unprivileged user: a compromise of the app (e.g. via a malicious tool
+# result or dependency) must not get root inside the container. The app writes
+# result files under /app, so that user owns it.
+RUN useradd --create-home --uid 10001 appuser && chown -R appuser:appuser /app
+USER appuser
 
 # API keys are not baked into the image. Pass them at runtime, e.g.
 #   docker run --env-file .env -p 8501:8501 travelgenie

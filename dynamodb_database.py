@@ -58,7 +58,7 @@ class ChatDatabase:
     def create_session_id(self, channel_id: str, user_id: str, thread_ts: Optional[str] = None) -> str:
         """Generate unique session ID"""
         components = f"{channel_id}:{user_id}:{thread_ts or 'main'}"
-        return hashlib.md5(components.encode()).hexdigest()
+        return hashlib.sha256(components.encode()).hexdigest()
 
     def save_message(self, session_id: str, role: str, content: str, metadata: Optional[Dict] = None):
         """Save a message to the database"""

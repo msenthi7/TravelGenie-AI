@@ -1,0 +1,48 @@
+name: Security checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sast-and-dependencies:
+    name: SAST (Bandit) + dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install scanners
+        run: pip install bandit pip-audit
+      - name: Bandit (fail on medium or higher)
+        run: bandit -r claude_orchestrator.py slack_bot.py streamlit_app.py dynamodb_database.py servers -ll
+      - name: pip-audit (known CVEs in pinned dependencies)
+        run: pip-audit -r requirements.txt
+
+  secrets:
+    name: Secret scan (Gitleaks, new commits)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  iac:
+    name: CloudFormation lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install cfn-lint
+      - name: cfn-lint (errors fail the build)
+        run: cfn-lint aws/cloudformation/infrastructure.yaml --ignore-checks W

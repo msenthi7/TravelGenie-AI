@@ -150,6 +150,54 @@ async def run_tool_threaded(tool_name: str, tool_input: Dict[str, Any]) -> tuple
     return await asyncio.to_thread(_run_tool_blocking, tool_name, tool_input)
 
 
+# --- Abuse controls ------------------------------------------------------------
+# Every message triggers paid Claude/SerpAPI calls, so unbounded input or request
+# rates let one user run up the bill ("denial of wallet") or starve other users.
+MAX_INPUT_CHARS = int(os.getenv("MAX_INPUT_CHARS", "2000"))
+RATE_LIMIT_REQUESTS = int(os.getenv("RATE_LIMIT_REQUESTS", "5"))
+RATE_LIMIT_WINDOW_SECONDS = int(os.getenv("RATE_LIMIT_WINDOW_SECONDS", "600"))
+
+
+class RateLimiter:
+    """Sliding-window limit per user (in memory; use Redis/DynamoDB when running several replicas)."""
+
+    def __init__(self, max_requests: int, window_seconds: int):
+        self.max_requests = max_requests
+        self.window = window_seconds
+        self._hits: Dict[str, List[float]] = {}
+
+    def allow(self, user_id: str) -> bool:
+        now = time.monotonic()
+        hits = [t for t in self._hits.get(user_id, []) if now - t < self.window]
+        allowed = len(hits) < self.max_requests
+        if allowed:
+            hits.append(now)
+        self._hits[user_id] = hits
+        return allowed
+
+
+class RecentEvents:
+    """Remember recent Slack event IDs: Slack redelivers events, and one @mention in a
+    thread arrives as both app_mention and message, so each must be processed once."""
+
+    def __init__(self, size: int = 1000):
+        self.size = size
+        self._seen: Dict[str, None] = {}
+
+    def first_time(self, key: Optional[str]) -> bool:
+        if not key:
+            return True
+        if key in self._seen:
+            return False
+        self._seen[key] = None
+        if len(self._seen) > self.size:
+            self._seen.pop(next(iter(self._seen)))
+        return True
+
+
+GENERIC_ERROR_REPLY = "Sorry, something went wrong while planning that. Please try again in a moment."
+
+
 def get_slack_system_prompt() -> str:
     """Get the base system prompt for the Slack Travel Assistant Bot."""
     base_prompt = get_system_prompt()
@@ -336,7 +384,7 @@ class ChatDatabase:
     def create_session_id(self, channel_id: str, user_id: str, thread_ts: Optional[str] = None) -> str:
         """Generate unique session ID"""
         components = f"{channel_id}:{user_id}:{thread_ts or 'main'}"
-        return hashlib.md5(components.encode()).hexdigest()
+        return hashlib.sha256(components.encode()).hexdigest()
 
     def save_message(self, session_id: str, role: str, content: str, metadata: Optional[Dict] = None):
         """Save a message to the database"""
@@ -442,6 +490,8 @@ class SlackTravelBot:
 
         self.tools = get_tool_definitions()
         self.system_prompt = get_slack_system_prompt()
+        self.rate_limiter = RateLimiter(RATE_LIMIT_REQUESTS, RATE_LIMIT_WINDOW_SECONDS)
+        self.recent_events = RecentEvents()
 
         logger.info(f"Initialized Travel Assistant Bot with {len(self.tools)} tools")
 
@@ -598,11 +648,32 @@ class SlackTravelBot:
             event = req.payload.get("event", {})
             event_type = event.get("type")
 
+            # Ignore bots (including ourselves: prevents reply loops) and edits/joins/etc.
+            if event.get("bot_id") or event.get("subtype"):
+                return
+            # Slack retries deliveries; a mention in a thread also arrives twice (app_mention
+            # + message). Key on channel+ts so each user message is processed exactly once.
+            if not self.recent_events.first_time(f"{event.get('channel')}:{event.get('ts')}"):
+                return
+
             if event_type == "app_mention":
                 await self.handle_mention(event)
             elif event_type == "message":
                 if event.get("channel_type") == "im" or event.get("thread_ts"):
                     await self.handle_message(event)
+
+    async def admit(self, user_id: str, text: str, channel_id: str, thread_ts: Optional[str]) -> bool:
+        """Apply input-size and per-user rate limits before spending money on a request."""
+        if len(text) > MAX_INPUT_CHARS:
+            await self.safe_post_message(channel=channel_id, thread_ts=thread_ts,
+                text=f"That message is too long ({len(text)} characters). Please keep it under {MAX_INPUT_CHARS}.")
+            return False
+        if not self.rate_limiter.allow(user_id or "unknown"):
+            logger.warning(f"Rate limit hit for user {user_id}")
+            await self.safe_post_message(channel=channel_id, thread_ts=thread_ts,
+                text="You're sending requests quickly. Please wait a few minutes and try again.")
+            return False
+        return True
 
     async def handle_mention(self, event: Dict):
         """Handle @mentions of the bot"""
@@ -625,8 +696,11 @@ class SlackTravelBot:
                      "• Convert currencies\n"
                      "• Analyze traffic and crowd conditions\n"
                      "• Plan comprehensive trips\n\n"
-                     "Try asking: *\"Plan a trip to Banff, Alberta from Reston, Virginia for June 7-14, 2025\"*"
+                     "Try asking: *\"Plan a 4-day trip to Banff from Reston, Virginia next month\"*"
             )
+            return
+
+        if not await self.admit(user_id, text, channel_id, thread_ts):
             return
 
         await self.safe_add_reaction(channel_id, thread_ts, "thinking_face")
@@ -647,13 +721,9 @@ class SlackTravelBot:
             )
 
         except Exception as e:
-            logger.error(f"Error handling mention: {e}", exc_info=True)
+            logger.error(f"Error handling mention: {redact_secrets(str(e))}")
             await self.safe_remove_reaction(channel_id, thread_ts, "thinking_face")
-            await self.safe_post_message(
-                channel=channel_id,
-                thread_ts=thread_ts,
-                text=f"Sorry, I encountered an error: {str(e)}"
-            )
+            await self.safe_post_message(channel=channel_id, thread_ts=thread_ts, text=GENERIC_ERROR_REPLY)
 
     async def handle_message(self, event: Dict):
         """Handle direct messages"""
@@ -669,9 +739,16 @@ class SlackTravelBot:
         if not text:
             return
 
+        session_id = self.db.create_session_id(channel_id, user_id, thread_ts)
+        if event.get("channel_type") != "im" and not self.db.get_session_history(session_id, limit=1):
+            # A reply in a channel thread the bot never joined: not addressed to us.
+            return
+
+        if not await self.admit(user_id, text, channel_id, thread_ts or ts):
+            return
+
         await self.safe_add_reaction(channel_id, ts, "thinking_face")
 
-        session_id = self.db.create_session_id(channel_id, user_id, thread_ts)
         self.db.upsert_session(session_id, channel_id, user_id, thread_ts)
 
         try:
@@ -687,13 +764,9 @@ class SlackTravelBot:
             )
 
         except Exception as e:
-            logger.error(f"Error handling message: {e}", exc_info=True)
+            logger.error(f"Error handling message: {redact_secrets(str(e))}")
             await self.safe_remove_reaction(channel_id, ts, "thinking_face")
-            await self.safe_post_message(
-                channel=channel_id,
-                thread_ts=thread_ts or ts,
-                text=f"Sorry, I encountered an error: {str(e)}"
-            )
+            await self.safe_post_message(channel=channel_id, thread_ts=thread_ts or ts, text=GENERIC_ERROR_REPLY)
 
     async def get_bot_id(self) -> str:
         """Get the bot's user ID"""
