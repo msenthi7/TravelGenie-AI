@@ -24,7 +24,7 @@ try:
     from servers.geocoder_server.geocoder_server import geocode_location, reverse_geocode, calculate_distance
     from servers.weather_server.weather_server import get_current_weather, get_weather_forecast
     from servers.finance_server.finance_server import convert_currency, get_market_overview
-    from servers.traffic_crowd_server.traffic_crowd_server import analyze_location_traffic, analyze_video_frame_realtime, analyze_youtube_video, get_traffic_patterns, compare_location_traffic
+    from servers.traffic_crowd_server.traffic_crowd_server import analyze_location_traffic, analyze_video_frame_realtime, analyze_youtube_video, get_traffic_patterns, compare_location_traffic, find_live_cams
 except ImportError as e:
     print(f"Warning: Could not import some server functions: {e}")
 
@@ -336,6 +336,20 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
             }
         },
         {
+            "name": "check_live_conditions",
+            "description": "See how busy a place looks RIGHT NOW: finds a public YouTube live webcam for the place and runs computer-vision crowd/foot-traffic/vehicle detection on a few frames. Use only when the user asks about current or live conditions (e.g. 'how crowded is Times Square right now?'), not for normal trip planning. Takes about 10-30 seconds. Results are rough estimates from classic computer vision on one camera view; always name the camera and share its link. Many small towns have no live cam; if none is found, say so.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "place": {
+                        "type": "string",
+                        "description": "Place or landmark, e.g. 'Times Square', 'Banff', 'Shibuya Crossing'"
+                    }
+                },
+                "required": ["place"]
+            }
+        },
+        {
             "name": "analyze_youtube_video",
             "description": "Analyze a YouTube video (including live streams) for real-time crowd, foot traffic, and vehicle detection. Extracts frames from the video and performs analysis. Perfect for analyzing live camera feeds from locations.",
             "input_schema": {
@@ -491,6 +505,47 @@ def _with_daily_forecast(result: Dict[str, Any]) -> Dict[str, Any]:
 
 
 
+
+LIVE_CHECK_TIMEOUT_S = 45
+
+
+def _check_live_conditions(place: Any) -> Dict[str, Any]:
+    """Find a live YouTube cam for a place and analyze a few frames, within a hard time limit."""
+    import concurrent.futures
+
+    def work() -> Dict[str, Any]:
+        found = find_live_cams(place, max_results=2)
+        if found.get("error") or not found.get("live_cams"):
+            return found if found.get("error") else {
+                "place": found.get("place"), "live_cam_found": False,
+                "note": found.get("note") or "No live webcam found for this place.",
+                "other_live_cams_possibly_elsewhere": found.get("other_live_cams_possibly_elsewhere", []),
+                "instruction": "These other cams are NOT confirmed to be in the requested place; only "
+                               "mention them as nearby/other options, and do not describe them as this place."}
+        last_error = None
+        for cam in found["live_cams"]:  # streams go offline; try the next one
+            result = analyze_youtube_video(youtube_url=cam["url"], location=str(place),
+                                           sample_frames=3, frame_interval=3)
+            if not result.get("error"):
+                return {"place": found["place"], "live_cam_found": True,
+                        "camera": {"title": cam["title"], "url": cam["url"], "channel": cam["channel"]},
+                        "frames_analyzed": result.get("frames_analyzed"),
+                        "analysis": result.get("aggregated_analysis"),
+                        "accuracy_note": "Rough estimate from classic computer vision (OpenCV HOG people "
+                                         "detector, blob and contour counts) on one camera view."}
+            last_error = result["error"]
+        return {"error": f"Found live cams but could not read them: {last_error}"}
+
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(work)
+    try:
+        return future.result(timeout=LIVE_CHECK_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        return {"error": f"Live camera check timed out after {LIVE_CHECK_TIMEOUT_S}s."}
+    finally:
+        pool.shutdown(wait=False)  # never block the caller on a stuck stream
+
+
 SIMULATED_TOOLS = {"analyze_location_traffic", "get_traffic_patterns", "compare_location_traffic"}
 SIMULATED_NOTE = ("Simulated estimate from a generic time-of-day template, not live or measured data. "
                   "Present it only as a typical pattern.")
@@ -604,6 +659,9 @@ def _execute_tool(tool_name: str, **kwargs) -> Dict[str, Any]:
                 analysis_type=kwargs.get("analysis_type", "comprehensive")
             )
         
+        elif tool_name == "check_live_conditions":
+            return _check_live_conditions(kwargs.get("place"))
+
         elif tool_name == "analyze_youtube_video":
             return analyze_youtube_video(
                 youtube_url=kwargs.get("youtube_url"),
@@ -699,6 +757,7 @@ Your capabilities include:
 - Getting weather forecasts to help plan activities
 - Converting currencies for international travel
 - Geocoding locations and calculating distances
+- Checking how busy a place looks right now via a public live webcam and computer vision (check_live_conditions)
 - Estimating typical (not live) traffic and crowd patterns from a generic time-of-day model
 - Analyzing video frames for crowd, vehicle, and foot traffic detection
 - Analyzing YouTube videos and live streams for real-time location analysis

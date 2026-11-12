@@ -756,6 +756,58 @@ def analyze_youtube_video(
         return {"error": f"YouTube video analysis failed: {str(e)}"}
 
 @mcp.tool()
+def find_live_cams(place: str, max_results: int = 3) -> Dict[str, Any]:
+    """
+    Find public YouTube live webcams for a place (city, landmark, ski area).
+
+    Searches YouTube for "<place> live cam" and keeps only streams that are live now.
+    Coverage depends on what people stream: popular cities and resorts usually have
+    cams, small towns often do not.
+
+    Args:
+        place: Place to search for, e.g. "Times Square", "Banff"
+        max_results: Number of live cams to return (1-5)
+
+    Returns:
+        Dict with a list of live cams (title, url, channel)
+    """
+    if not YT_DLP_AVAILABLE:
+        return {"error": "yt-dlp is not installed"}
+    # The search text comes from the model: keep it short and plain so it can only
+    # ever be a YouTube search term (no URLs, no yt-dlp option syntax).
+    place = re.sub(r"[^\w\s,.'-]", " ", str(place or ""), flags=re.UNICODE).strip()[:80]
+    if not place:
+        return {"error": "A place name is required."}
+    max_results = max(1, min(int(max_results or 3), 5))
+    opts = {"quiet": True, "no_warnings": True, "extract_flat": True,
+            "skip_download": True, "socket_timeout": 15}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            found = ydl.extract_info(f"ytsearch15:{place} live cam", download=False) or {}
+    except Exception as e:
+        return {"error": f"YouTube search failed: {str(e)[:200]}"}
+    # YouTube search is loose ("Reston" can return a cam 200 km away), so only count a cam
+    # as being in the place when its title names the place; keep the rest as labeled extras.
+    key_words = [w for w in re.findall(r"\w+", place.split(",")[0].lower()) if len(w) > 2]
+    cams, elsewhere = [], []
+    for entry in found.get("entries") or []:
+        url = entry.get("url") or ""
+        if entry.get("live_status") != "is_live" or not url.startswith("https://www.youtube.com/watch?v="):
+            continue
+        cam = {"title": entry.get("title"), "url": url, "channel": entry.get("channel") or entry.get("uploader")}
+        title = (cam["title"] or "").lower()
+        if key_words and all(w in title for w in key_words):
+            cams.append(cam)
+        elif len(elsewhere) < 2:
+            elsewhere.append(cam)
+        if len(cams) >= max_results:
+            break
+    return {"place": place, "live_cams": cams, "count": len(cams),
+            "other_live_cams_possibly_elsewhere": elsewhere,
+            "note": None if cams else f"No live YouTube cam whose title names '{place}'."}
+
+
+@mcp.tool()
 def get_traffic_patterns(
     location: str,
     start_date: Optional[str] = None,
