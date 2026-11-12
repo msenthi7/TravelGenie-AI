@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import uuid
 from typing import Dict, Any, Optional, List
 from datetime import datetime
@@ -13,6 +14,19 @@ GEOCODE_DIR = "geocoded_locations"
 
 # Initialize FastMCP server
 mcp = FastMCP("geocoder")
+
+
+def _safe_json_path(directory: str, name) -> str:
+    """Build <directory>/<name>.json without letting user/model input escape the folder.
+
+    File names come from search inputs (city names, event queries), which the model
+    controls, so characters like "/" or ".." must never reach the filesystem path.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.,-]", "_", str(name)).lstrip(".")[:150] or "result"
+    path = os.path.join(directory, safe + ".json")
+    if os.path.dirname(os.path.abspath(path)) != os.path.abspath(directory):
+        raise ValueError("Invalid result file name")
+    return path
 
 def get_geolocator():
     """Initialize and return a geolocator with rate limiting."""
@@ -110,7 +124,7 @@ def geocode_location(
         location_id = f"{location.replace(' ', '_').replace(',', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         os.makedirs(GEOCODE_DIR, exist_ok=True)
         
-        file_path = os.path.join(GEOCODE_DIR, f"{location_id}.json")
+        file_path = _safe_json_path(GEOCODE_DIR, location_id)
         with open(file_path, "w") as f:
             json.dump(response, f, indent=2)
         
@@ -187,7 +201,7 @@ def reverse_geocode(
         coord_id = f"reverse_{str(latitude).replace('.', '_')}_{str(longitude).replace('.', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         os.makedirs(GEOCODE_DIR, exist_ok=True)
         
-        file_path = os.path.join(GEOCODE_DIR, f"{coord_id}.json")
+        file_path = _safe_json_path(GEOCODE_DIR, coord_id)
         with open(file_path, "w") as f:
             json.dump(response, f, indent=2)
         
@@ -232,7 +246,7 @@ def batch_geocode(locations: List[str]) -> Dict[str, Any]:
     
     # Save batch results
     os.makedirs(GEOCODE_DIR, exist_ok=True)
-    file_path = os.path.join(GEOCODE_DIR, f"{results['batch_id']}.json")
+    file_path = _safe_json_path(GEOCODE_DIR, results['batch_id'])
     with open(file_path, "w") as f:
         json.dump(results, f, indent=2)
     
@@ -417,7 +431,7 @@ def get_location_details(location_id: str) -> str:
     Args:
         location_id: The location ID to retrieve details for
     """
-    file_path = os.path.join(GEOCODE_DIR, f"{location_id}.json")
+    file_path = _safe_json_path(GEOCODE_DIR, location_id)
     
     if not os.path.exists(file_path):
         return f"# Location Not Found: {location_id}\n\nNo geocoded location found with this ID."

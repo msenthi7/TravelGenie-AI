@@ -14,6 +14,8 @@ from datetime import datetime
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 import hashlib
+import threading
+import time
 from functools import wraps
 
 from dotenv import load_dotenv
@@ -40,7 +42,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "servers" / "finance_server"))
 sys.path.insert(0, str(PROJECT_ROOT / "servers" / "traffic_crowd_server"))
 
 try:
-    from claude_orchestrator import get_tool_definitions, execute_tool, get_system_prompt
+    from claude_orchestrator import (
+        get_tool_definitions, execute_tool, get_system_prompt,
+        redact_secrets, tool_error_message,
+    )
 except ImportError as e:
     print(f"Error importing orchestrator: {e}")
     sys.exit(1)
@@ -110,6 +115,39 @@ def retry_slack_operation(max_retries: int = 3, delay: float = 1.0):
                 raise last_exception
         return wrapper
     return decorator
+
+
+# The geocoder tools call OpenStreetMap Nominatim, whose usage policy allows about
+# 1 request/second. geocoder_server builds a fresh RateLimiter on every call, so
+# that limit only holds if these tools never run at the same time.
+NOMINATIM_TOOLS = {"geocode_location", "reverse_geocode", "calculate_distance"}
+_nominatim_lock = threading.Lock()
+
+
+def _run_tool_blocking(tool_name: str, tool_input: Dict[str, Any]) -> tuple:
+    """Run one tool and return (result_text, is_error). Never raises."""
+    logger.info(f"Executing tool '{tool_name}' with params: {tool_input}")
+    try:
+        if tool_name in NOMINATIM_TOOLS:
+            with _nominatim_lock:
+                result = execute_tool(tool_name, **tool_input)
+        else:
+            result = execute_tool(tool_name, **tool_input)
+        error = tool_error_message(result)
+        text = json.dumps(result, default=str, indent=2) if isinstance(result, dict) else str(result)
+        # Redact before the text goes anywhere: Claude, the database, or the log.
+        text = redact_secrets(text)[:10000]
+        if error:
+            logger.warning(f"Tool '{tool_name}' returned an error: {redact_secrets(error)[:300]}")
+        return text, error is not None
+    except Exception as e:
+        logger.error(f"Error executing tool '{tool_name}': {redact_secrets(str(e))}")
+        return redact_secrets(f"Error executing tool '{tool_name}': {e}"), True
+
+
+async def run_tool_threaded(tool_name: str, tool_input: Dict[str, Any]) -> tuple:
+    """Run a blocking tool in a worker thread so several can run at once."""
+    return await asyncio.to_thread(_run_tool_blocking, tool_name, tool_input)
 
 
 def get_slack_system_prompt() -> str:
@@ -369,7 +407,7 @@ class SlackTravelBot:
     Slack-integrated Travel Assistant Bot with Claude AI
     """
 
-    def __init__(self, model: str = "claude-3-7-sonnet-20250219"):
+    def __init__(self, model: str = "claude-opus-5-5"):
         self.model = model
         self.db = ChatDatabase()
 
@@ -476,91 +514,78 @@ class SlackTravelBot:
         tools = self._anthropic_tools_from_definitions()
 
         MAX_TURNS = 10
+        failed_tools: List[str] = []
+        # Rebuilt per request so "today's date" in the prompt is never stale.
+        system_prompt = get_slack_system_prompt()
         for turn in range(MAX_TURNS):
             try:
-                response = self.claude.messages.create(
+                # Run the blocking SDK call in a thread so the Slack event loop stays responsive.
+                response = await asyncio.to_thread(
+                    self.claude.messages.create,
                     model=self.model,
-                    system=self.system_prompt,
+                    system=system_prompt,
                     tools=tools,
                     tool_choice={"type": "auto"},
-                    max_tokens=4096,
-                    temperature=0.1,
+                    max_tokens=16000,
                     messages=messages,
                 )
 
                 assistant_content = response.content
                 tool_uses = [b for b in assistant_content if hasattr(b, 'type') and b.type == "tool_use"]
 
-                MAX_TOOLS_PER_TURN = 5
-                tools_to_execute = tool_uses[:MAX_TOOLS_PER_TURN]
-                remaining_tools = tool_uses[MAX_TOOLS_PER_TURN:]
-
-                assistant_content_dicts = []
-                for block in assistant_content:
-                    if hasattr(block, 'type'):
-                        if block.type == "text":
-                            assistant_content_dicts.append({
-                                "type": "text",
-                                "text": block.text
-                            })
-                        elif block.type == "tool_use":
-                            if block in tools_to_execute:
-                                assistant_content_dicts.append({
-                                    "type": "tool_use",
-                                    "id": block.id,
-                                    "name": block.name,
-                                    "input": block.input
-                                })
-
-                messages.append({"role": "assistant", "content": assistant_content_dicts})
+                # Send Claude's turn back unchanged (thinking blocks included) and run
+                # every tool it asked for: every tool_use needs a matching tool_result.
+                tools_to_execute = tool_uses
+                messages.append({"role": "assistant", "content": assistant_content})
 
                 if tools_to_execute:
+                    # Independent tools (flights, hotels, events, weather...) run concurrently,
+                    # so a round takes as long as the slowest call instead of the sum of all.
+                    started = time.monotonic()
+                    outcomes = await asyncio.gather(
+                        *(run_tool_threaded(tu.name, tu.input or {}) for tu in tools_to_execute)
+                    )
+                    logger.info(
+                        f"Ran {len(tools_to_execute)} tools in parallel in {time.monotonic() - started:.1f}s"
+                    )
+
                     tool_results_blocks: List[Dict[str, Any]] = []
-
-                    if len(tool_uses) > MAX_TOOLS_PER_TURN:
-                        logger.info(f"Limiting tool execution to {MAX_TOOLS_PER_TURN} tools (requested {len(tool_uses)} tools). {len(remaining_tools)} tools will be handled in next turn.")
-
-                    for tu in tools_to_execute:
-                        tool_name = tu.name
-                        tool_use_id = tu.id
-                        tool_input = tu.input if hasattr(tu, 'input') else {}
-
-                        logger.info(f"Executing tool '{tool_name}' with params: {tool_input}")
-
-                        try:
-                            result = execute_tool(tool_name, **tool_input)
-
-                            if isinstance(result, dict):
-                                result_text = json.dumps(result, default=str, indent=2)[:10000]
-                            else:
-                                result_text = str(result)[:10000]
-
-                            self.db.save_tool_call(session_id, tool_name, tool_input, result_text)
-
-                        except Exception as e:
-                            result_text = f"Error executing tool '{tool_name}': {str(e)}"
-                            logger.error(result_text, exc_info=True)
-                            self.db.save_tool_call(session_id, tool_name, tool_input, str(e), "error")
-
-                        tool_results_blocks.append({
+                    for tu, (result_text, is_error) in zip(tools_to_execute, outcomes):
+                        self.db.save_tool_call(
+                            session_id, tu.name, tu.input or {}, result_text,
+                            "error" if is_error else "success",
+                        )
+                        block: Dict[str, Any] = {
                             "type": "tool_result",
-                            "tool_use_id": tool_use_id,
-                            "content": [{"type": "text", "text": result_text}]
-                        })
+                            "tool_use_id": tu.id,
+                            "content": [{"type": "text", "text": result_text}],
+                        }
+                        if is_error:
+                            block["is_error"] = True
+                            failed_tools.append(tu.name)
+                        tool_results_blocks.append(block)
 
+                    # All results go back in a single user message, in the same order.
                     messages.append({"role": "user", "content": tool_results_blocks})
                     continue
 
                 text_blocks = [b for b in assistant_content if hasattr(b, 'type') and b.type == "text"]
                 final_text = "\n".join([b.text for b in text_blocks]).strip() if text_blocks else "(No response)"
 
+                if failed_tools:
+                    # Make partial data visible to the user, not just to Claude.
+                    names = ", ".join(sorted(set(failed_tools)))
+                    final_text += f"\n\n:warning: _Some live lookups failed ({names}), so parts of this answer may be incomplete._"
+
                 self.db.save_message(session_id, "assistant", final_text)
 
                 return final_text
 
             except Exception as e:
-                logger.error(f"Error processing query: {e}", exc_info=True)
-                return f"Error: {str(e)}"
+                # Full detail goes to the server log only; the user gets a generic message,
+                # so internal errors (URLs, stack details, keys) are never posted to Slack.
+                logger.error(f"Error processing query: {redact_secrets(str(e))}")
+                return "Sorry, something went wrong while planning that. Please try again in a moment."
 
         return "Conversation exceeded maximum turns. Please try a simpler query."
 
@@ -695,7 +720,7 @@ class SlackTravelBot:
 async def main():
     """Main entry point"""
     test_mode = "--test" in sys.argv
-    model = os.getenv("CLAUDE_MODEL", "claude-3-7-sonnet-20250219")
+    model = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
 
     try:
         client = SlackTravelBot(model=model)

@@ -20,6 +20,7 @@ Features:
 import requests
 import json
 import os
+import re
 import base64
 from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timedelta
@@ -41,6 +42,19 @@ except ImportError:
 
 TRAFFIC_CROWD_DIR = "traffic_crowd_data"
 mcp = FastMCP("traffic-crowd-assistant")
+
+
+def _safe_json_path(directory: str, name) -> str:
+    """Build <directory>/<name>.json without letting user/model input escape the folder.
+
+    File names come from search inputs (city names, event queries), which the model
+    controls, so characters like "/" or ".." must never reach the filesystem path.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.,-]", "_", str(name)).lstrip(".")[:150] or "result"
+    path = os.path.join(directory, safe + ".json")
+    if os.path.dirname(os.path.abspath(path)) != os.path.abspath(directory):
+        raise ValueError("Invalid result file name")
+    return path
 
 def get_opencv_available() -> bool:
     """Check if OpenCV is available for video processing."""
@@ -366,7 +380,7 @@ def analyze_location_traffic(
             }
         
         # Save results to file
-        file_path = os.path.join(TRAFFIC_CROWD_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(processed_data, f, indent=2)
         
@@ -448,7 +462,7 @@ def analyze_video_frame_realtime(
         os.makedirs(TRAFFIC_CROWD_DIR, exist_ok=True)
         
         # Save frame analysis
-        file_path = os.path.join(TRAFFIC_CROWD_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(analysis, f, indent=2)
         
@@ -709,7 +723,7 @@ def analyze_youtube_video(
                 analysis_result["location_context"] = {"name": location}
         
         # Save analysis
-        file_path = os.path.join(TRAFFIC_CROWD_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(analysis_result, f, indent=2, default=str)
         
@@ -814,7 +828,7 @@ def get_traffic_patterns(
         os.makedirs(TRAFFIC_CROWD_DIR, exist_ok=True)
         
         # Save results
-        file_path = os.path.join(TRAFFIC_CROWD_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(processed_data, f, indent=2)
         
@@ -943,7 +957,7 @@ def get_traffic_details(search_id: str) -> str:
         JSON string with detailed traffic information
     """
     
-    file_path = os.path.join(TRAFFIC_CROWD_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No traffic analysis found with ID: {search_id}"
@@ -1022,7 +1036,7 @@ def get_traffic_search_details(search_id: str) -> str:
     Args:
         search_id: The traffic search ID to retrieve details for
     """
-    file_path = os.path.join(TRAFFIC_CROWD_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"# Traffic Analysis Not Found: {search_id}\n\nNo traffic analysis found with this ID."

@@ -3,12 +3,26 @@
 import requests
 import json
 import os
+import re
 from typing import List, Dict, Optional, Any, Tuple
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
 
 WEATHER_DIR = os.getenv("WEATHER_DATA_DIR", "weather_data")
 mcp = FastMCP("weather-assistant")
+
+
+def _safe_json_path(directory: str, name) -> str:
+    """Build <directory>/<name>.json without letting user/model input escape the folder.
+
+    File names come from search inputs (city names, event queries), which the model
+    controls, so characters like "/" or ".." must never reach the filesystem path.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.,-]", "_", str(name)).lstrip(".")[:150] or "result"
+    path = os.path.join(directory, safe + ".json")
+    if os.path.dirname(os.path.abspath(path)) != os.path.abspath(directory):
+        raise ValueError("Invalid result file name")
+    return path
 
 GEOCODING_API = "https://geocoding-api.open-meteo.com/v1/search"
 WEATHER_API = "https://api.open-meteo.com/v1/forecast"
@@ -113,7 +127,7 @@ def get_current_weather(
             "current": current
         }
         
-        file_path = os.path.join(WEATHER_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(WEATHER_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(processed_data, f, indent=2)
         
@@ -219,7 +233,7 @@ def get_weather_forecast(
             "hourly": weather_data.get("hourly", {}) if hourly else {}
         }
         
-        file_path = os.path.join(WEATHER_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(WEATHER_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(processed_data, f, indent=2)
         
@@ -348,7 +362,7 @@ def get_historical_weather(
         }
         
         # Save results to file
-        file_path = os.path.join(WEATHER_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(WEATHER_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(processed_data, f, indent=2)
         
@@ -451,7 +465,7 @@ def get_weather_details(search_id: str) -> str:
         JSON string with detailed weather information
     """
     
-    file_path = os.path.join(WEATHER_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(WEATHER_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No weather search found with ID: {search_id}"
@@ -657,7 +671,7 @@ def get_weather_search_details(search_id: str) -> str:
     Args:
         search_id: The weather search ID to retrieve details for
     """
-    file_path = os.path.join(WEATHER_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(WEATHER_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"# Weather Search Not Found: {search_id}\n\nNo weather search found with this ID."

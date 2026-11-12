@@ -162,3 +162,13 @@ uv.lock
 # Do not ignore documentation or code files
 !README.md
 !*.py 
+# Local runtime data: chat history and raw API results (may contain personal data)
+*.db
+*.sqlite
+flights/
+hotels/
+events/
+finance/
+weather_data/
+geocoded_locations/
+traffic_crowd_data/

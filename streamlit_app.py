@@ -40,11 +40,49 @@ try:
 except ImportError:
     pass
 
+from claude_orchestrator import load_search_file, summarize_flights, summarize_hotels, summarize_weather
+
 st.set_page_config(
     page_title="Travel Assistant - MCP Orchestration",
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
+def safe_error(e) -> str:
+    """Short, secret-free error text for the UI."""
+    from claude_orchestrator import redact_secrets
+    return redact_secrets(str(e))[:300]
+
+
+# Common cities → main airport, so the Plan Trip form works without codes for typical demos.
+CITY_AIRPORTS = {
+    "reston": "IAD", "washington": "IAD", "dulles": "IAD", "arlington": "DCA", "banff": "YYC", "calgary": "YYC",
+    "new york": "JFK", "nyc": "JFK", "boston": "BOS", "chicago": "ORD", "los angeles": "LAX", "san francisco": "SFO",
+    "seattle": "SEA", "denver": "DEN", "miami": "MIA", "atlanta": "ATL", "dallas": "DFW", "austin": "AUS",
+    "las vegas": "LAS", "orlando": "MCO", "vancouver": "YVR", "toronto": "YYZ", "montreal": "YUL",
+    "london": "LHR", "paris": "CDG", "tokyo": "HND", "cancun": "CUN", "honolulu": "HNL",
+}
+
+
+def resolve_airport(code: str, city: str):
+    """Return a valid IATA code from the form, or look up the city; None if unknown."""
+    code = (code or "").strip().upper()
+    if code:
+        return code if len(code) == 3 and code.isalpha() else None
+    city_l = (city or "").lower()
+    for name, airport in CITY_AIRPORTS.items():
+        if name in city_l:
+            return airport
+    return None
+
+
+def show_debug_details(e) -> None:
+    """Stack traces reveal code paths and data; show them only when debugging locally."""
+    if os.getenv("TRAVELGENIE_DEBUG") == "1":
+        import traceback
+        from claude_orchestrator import redact_secrets
+        st.code(redact_secrets(traceback.format_exc()))
+
 
 @st.cache_resource
 def get_server_keys():
@@ -125,6 +163,13 @@ with tab1:
         with col1:
             origin = st.text_input("Origin", placeholder="e.g., Reston, Virginia", key="origin")
             destination = st.text_input("Destination", placeholder="e.g., Banff, Alberta", key="dest")
+            ac1, ac2 = st.columns(2)
+            with ac1:
+                origin_airport = st.text_input("From airport", placeholder="e.g., IAD", max_chars=3, key="origin_airport",
+                                               help="3-letter IATA code. Leave blank to look up common cities.")
+            with ac2:
+                dest_airport = st.text_input("To airport", placeholder="e.g., YYC", max_chars=3, key="dest_airport",
+                                             help="3-letter IATA code. Leave blank to look up common cities.")
             start_date = st.date_input("Start Date", value=datetime.now().date() + timedelta(days=7), key="start")
             end_date = st.date_input("End Date", value=datetime.now().date() + timedelta(days=14), key="end")
         
@@ -169,6 +214,16 @@ with tab1:
         if end_date <= start_date:
             st.error("End date must be after start date")
             st.stop()
+
+        if start_date < datetime.now().date():
+            st.error("Start date is in the past")
+            st.stop()
+
+        origin_code = resolve_airport(origin_airport, origin)
+        dest_code = resolve_airport(dest_airport, destination)
+        if use_flights and not (origin_code and dest_code):
+            st.warning("Flights skipped: enter 3-letter airport codes (e.g. IAD, YYC) for cities I can't look up.")
+            use_flights = False
         
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -208,7 +263,7 @@ with tab1:
                 st.warning(f"Geocoding incomplete: {origin} → {destination} | Check coordinates")
             current_step += 1
         except Exception as e:
-            st.error(f"Geocoding error: {e}")
+            st.error(f"Geocoding error: {safe_error(e)}")
             results["geocoding"] = None
         
         if use_flights:
@@ -218,8 +273,8 @@ with tab1:
                 from servers.flight_server.flight_server import search_flights
                 
                 flight_results = search_flights(
-                    departure_id=origin,
-                    arrival_id=destination,
+                    departure_id=origin_code,
+                    arrival_id=dest_code,
                     outbound_date=start_date.strftime("%Y-%m-%d"),
                     return_date=end_date.strftime("%Y-%m-%d"),
                     adults=adults,
@@ -238,7 +293,7 @@ with tab1:
                                 flight_results["best_flights"] = full_flight_data.get("best_flights", [])
                                 flight_results["other_flights"] = full_flight_data.get("other_flights", [])
                     except Exception as e:
-                        st.warning(f"Could not load full flight data: {e}")
+                        st.warning(f"Could not load full flight data: {safe_error(e)}")
                 
                 results["flights"] = flight_results
                 best_flights = flight_results.get("best_flights", [])
@@ -255,7 +310,7 @@ with tab1:
                         st.warning(f"No flights found. Try using airport codes (e.g., 'IAD' for Reston area, 'YYC' for Calgary/Banff area)")
                 current_step += 1
             except Exception as e:
-                st.error(f"Flight search error: {e}")
+                st.error(f"Flight search error: {safe_error(e)}")
                 results["flights"] = None
         
         if use_hotels:
@@ -283,7 +338,7 @@ with tab1:
                                 full_hotel_data = json.load(f)
                                 hotel_results["properties"] = full_hotel_data.get("properties", [])
                     except Exception as e:
-                        st.warning(f"Could not load full hotel data: {e}")
+                        st.warning(f"Could not load full hotel data: {safe_error(e)}")
                 
                 results["hotels"] = hotel_results
                 hotel_count = hotel_results.get("total_properties", 0)
@@ -293,7 +348,7 @@ with tab1:
                     st.warning(f"No hotels found for {destination}")
                 current_step += 1
             except Exception as e:
-                st.error(f"Hotel search error: {e}")
+                st.error(f"Hotel search error: {safe_error(e)}")
                 results["hotels"] = None
         
         if use_weather:
@@ -324,7 +379,7 @@ with tab1:
                 st.success("Weather forecast retrieved")
                 current_step += 1
             except Exception as e:
-                st.error(f"Weather error: {e}")
+                st.error(f"Weather error: {safe_error(e)}")
                 results["weather"] = None
         
         if use_events:
@@ -333,7 +388,8 @@ with tab1:
             try:
                 from servers.event_server.event_server import search_events
                 
-                event_query = ", ".join(interests) if interests else "events"
+                # Google Events finds scheduled events (concerts, festivals...), not activities like hiking.
+                event_query = "events"
                 event_results = search_events(
                     query=event_query,
                     location=destination,
@@ -341,12 +397,17 @@ with tab1:
                     max_results=20
                 )
                 
+                full_events = load_search_file("events", event_results.get("search_id")) or {}
+                event_results["events"] = full_events.get("events_results", [])
                 results["events"] = event_results
-                event_count = len(event_results.get("events", []))
-                st.success(f"Found {event_count} events")
+                event_count = len(event_results["events"])
+                if event_count:
+                    st.success(f"Found {event_count} events")
+                else:
+                    st.info(f"No scheduled events listed for {destination} in this period")
                 current_step += 1
             except Exception as e:
-                st.error(f"Event search error: {e}")
+                st.error(f"Event search error: {safe_error(e)}")
                 results["events"] = None
         
         if use_finance:
@@ -378,9 +439,9 @@ with tab1:
                     best_flights = results["flights"].get("best_flights", [])
                     other_flights = results["flights"].get("other_flights", [])
                     flights = best_flights + other_flights
-                    if flights:
-                        price_info = flights[0].get("price", {})
-                        flight_price = price_info.get("total") or price_info.get("extracted_value") or 0
+                    prices = [f.get("price") for f in flights if isinstance(f.get("price"), (int, float))]
+                    if prices:
+                        flight_price = min(prices)
                         if flight_price:
                             total_cost += flight_price
                             cost_breakdown["flights"] = flight_price
@@ -388,11 +449,13 @@ with tab1:
                 if results.get("hotels"):
                     hotels = results["hotels"].get("properties", [])
                     if hotels:
-                        rate_info = hotels[0].get("rate_per_night", {})
-                        price_per_night = rate_info.get("extracted_lowest") or rate_info.get("low") or 0
+                        cheapest = min(hotels, key=lambda h: (h.get("rate_per_night") or {}).get("extracted_lowest") or float("inf"))
+                        rate_info = cheapest.get("rate_per_night") or {}
+                        price_per_night = rate_info.get("extracted_lowest") or 0
                         if price_per_night:
                             nights = (end_date - start_date).days
-                            hotel_total = price_per_night * nights * adults
+                            # Hotel rates are per room, not per guest; prefer the listed stay total.
+                            hotel_total = (cheapest.get("total_rate") or {}).get("extracted_lowest") or price_per_night * nights
                             total_cost += hotel_total
                             cost_breakdown["hotels"] = hotel_total
                             cost_breakdown["hotels_per_night"] = price_per_night
@@ -408,7 +471,7 @@ with tab1:
                 st.success("Budget analysis complete")
                 current_step += 1
             except Exception as e:
-                st.error(f"Finance error: {e}")
+                st.error(f"Finance error: {safe_error(e)}")
                 results["currency_conversion"] = None
         
         progress_bar.progress(1.0)
@@ -418,83 +481,88 @@ with tab1:
         
         with results_container:
             st.header("Travel Plan Results")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                if results.get("flights"):
-                    best_flights = results["flights"].get("best_flights", [])
-                    other_flights = results["flights"].get("other_flights", [])
-                    flight_count = len(best_flights) + len(other_flights)
-                    st.metric("Flight Options", flight_count)
-            
-            with col2:
-                if results.get("hotels"):
-                    hotel_count = results["hotels"].get("total_properties", 0)
-                    st.metric("Hotel Options", hotel_count)
-            
-            with col3:
-                if results.get("events"):
-                    event_count = len(results["events"].get("events", []))
-                    st.metric("Events Found", event_count)
-            
-            with col4:
-                if results.get("budget_analysis"):
-                    remaining = results["budget_analysis"].get("remaining_budget", 0)
-                    st.metric("Remaining Budget", f"${remaining:,.2f}")
-            
-            if results.get("flights"):
-                st.subheader("Flight Options")
-                best_flights = results["flights"].get("best_flights", [])
-                other_flights = results["flights"].get("other_flights", [])
-                
-                if best_flights:
-                    st.markdown("**Best Flights:**")
-                    for i, flight in enumerate(best_flights[:5], 1):
-                        price_info = flight.get("price", {})
-                        price = price_info.get("total") or price_info.get("extracted_value") or "N/A"
-                        with st.expander(f"Best Flight {i}: ${price}"):
-                            st.json(flight)
-                
-                if other_flights:
-                    st.markdown("**Other Flights:**")
-                    for i, flight in enumerate(other_flights[:5], 1):
-                        price_info = flight.get("price", {})
-                        price = price_info.get("total") or price_info.get("extracted_value") or "N/A"
-                        with st.expander(f"Flight {i}: ${price}"):
-                            st.json(flight)
-                
-                if not best_flights and not other_flights:
-                    st.info("No flight results available. Try using airport codes (e.g., 'IAD' for Reston area, 'YYC' for Calgary/Banff area)")
-            
-            if results.get("hotels"):
-                st.subheader("Hotel Options")
-                hotels = results["hotels"].get("properties", [])
-                if hotels:
-                    for i, hotel in enumerate(hotels[:5], 1):
-                        title = hotel.get("title", "N/A")
-                        price_info = hotel.get("rate_per_night", {})
-                        price = price_info.get("extracted_lowest") or price_info.get("low") or "N/A"
-                        with st.expander(f"Hotel {i}: {title} - ${price}/night"):
-                            st.json(hotel)
+            flight_rows = summarize_flights(results.get("flights") or {}, limit=10)
+            hotel_rows = summarize_hotels(results.get("hotels") or {}, limit=10)
+            weather_rows = []
+            if results.get("weather") and not results["weather"].get("error"):
+                weather_rows = summarize_weather(load_search_file("weather_data", results["weather"].get("search_id")) or {})
+            events = (results.get("events") or {}).get("events", [])
+            budget_info = results.get("budget_analysis")
+
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Flight options", len(flight_rows))
+            m2.metric("Hotel options", len(hotel_rows))
+            m3.metric("Events found", len(events))
+            if budget_info:
+                remaining = budget_info.get("remaining_budget", 0)
+                m4.metric("Budget left" if remaining >= 0 else "Over budget", f"${abs(remaining):,.0f}",
+                          delta=None if remaining >= 0 else "over", delta_color="inverse")
+
+            if use_flights:
+                st.subheader("✈️ Flights")
+                if flight_rows:
+                    st.dataframe([{
+                        "Airline": r["airlines"], "Departs": r["depart"], "Arrives": r["arrive"],
+                        "Stops": r["stops"], "Duration": f"{(r['duration_min'] or 0) // 60}h {(r['duration_min'] or 0) % 60}m",
+                        "Price": f"${r['price']:,}" if isinstance(r["price"], (int, float)) else "n/a",
+                    } for r in flight_rows], hide_index=True, use_container_width=True)
                 else:
-                    st.info(f"No hotel results available for {destination}")
-            
-            if results.get("weather"):
-                st.subheader("Weather Forecast")
-                st.json(results["weather"])
-            
-            if results.get("events"):
-                st.subheader("Local Events")
-                events = results["events"].get("events", [])[:10]
-                for i, event in enumerate(events, 1):
-                    with st.expander(f"Event {i}: {event.get('title', 'N/A')}"):
-                        st.json(event)
-            
-            if results.get("budget_analysis"):
-                st.subheader("Budget Analysis")
-                st.json(results["budget_analysis"])
-            
+                    st.info(f"No flights found for {origin_code} → {dest_code} on these dates.")
+
+            if use_hotels:
+                st.subheader("🏨 Hotels")
+                if hotel_rows:
+                    nights = (end_date - start_date).days
+                    st.dataframe([{
+                        "Name": r["name"], "Type": r["type"],
+                        "Rating": f"⭐ {r['rating']:.1f} ({r['reviews'] or 0})" if r["rating"] else "-",
+                        "Per night": f"${r['price_per_night']:,}" if r["price_per_night"] else "-",
+                        f"Total ({nights} nights)": f"${r['total_price']:,}" if r["total_price"] else "-",
+                    } for r in hotel_rows], hide_index=True, use_container_width=True)
+                else:
+                    st.info(f"No hotels found for {destination} on these dates.")
+
+            if use_weather:
+                st.subheader("🌤️ Weather (next days)")
+                if weather_rows:
+                    st.dataframe([{
+                        "Date": r["date"], "Conditions": r["conditions"],
+                        "High": f"{r['high_c']}°C", "Low": f"{r['low_c']}°C", "Precip.": f"{r['precip_mm']} mm",
+                    } for r in weather_rows], hide_index=True, use_container_width=True)
+                    st.caption("Forecasts cover the next few days only, not necessarily your travel dates.")
+                else:
+                    st.info("Weather forecast unavailable.")
+
+            if use_events:
+                st.subheader("🎉 Events")
+                if events:
+                    for event in events[:8]:
+                        when = (event.get("date") or {}).get("when", "")
+                        venue = (event.get("venue") or {}).get("name") or ", ".join(event.get("address") or [])
+                        link = event.get("link")
+                        title = f"[{event.get('title', 'Event')}]({link})" if link else event.get("title", "Event")
+                        st.markdown(f"- **{title}** · {when} · {venue}")
+                else:
+                    st.info(f"No scheduled events listed for {destination} in this period.")
+
+            if budget_info:
+                st.subheader("💰 Budget")
+                breakdown = budget_info.get("cost_breakdown", {})
+                b1, b2, b3 = st.columns(3)
+                b1.metric("Your budget", f"${budget_info.get('total_budget_usd', 0):,.0f}")
+                b2.metric("Cheapest flight + hotel", f"${budget_info.get('estimated_cost_usd', 0):,.0f}")
+                b3.metric("Flight / hotel", f"${breakdown.get('flights', 0):,.0f} / ${breakdown.get('hotels', 0):,.0f}")
+                remaining = budget_info.get("remaining_budget", 0)
+                if remaining < 0:
+                    st.warning(f"Over budget by ${-remaining:,.0f} before food and activities. Try fewer nights, other dates, or a cheaper area.")
+                else:
+                    st.success(f"${remaining:,.0f} left for food, activities and transport.")
+                if not breakdown.get("flights") and use_flights:
+                    st.caption("Flight cost not included: no flight prices were found.")
+
+            with st.expander("Raw data (JSON)"):
+                st.json(results, expanded=False)
+
             st.download_button(
                 label="Download Full Results (JSON)",
                 data=json.dumps(results, indent=2, default=str),
@@ -532,15 +600,33 @@ with tab2:
             st.session_state.claude_client = Anthropic(api_key=anthropic_api_key)
             st.session_state.claude_api_key = anthropic_api_key
         except Exception as e:
-            st.error(f"Error initializing Claude client: {e}")
+            st.error(f"Error initializing Claude client: {safe_error(e)}")
             st.stop()
     
     try:
-        from claude_orchestrator import get_tool_definitions, execute_tool, get_system_prompt
+        from claude_orchestrator import get_tool_definitions, execute_tool, get_system_prompt, redact_secrets, tool_error_message
     except ImportError as e:
-        st.error(f"Could not import orchestrator: {e}")
+        st.error(f"Could not import orchestrator: {safe_error(e)}")
         st.stop()
     
+
+    def run_chat_tool(tool_name, tool_input, tool_id, tool_status, failed_tools):
+        """Run one tool for the chat tab: redact secrets, flag errors for Claude and the user."""
+        try:
+            result = execute_tool(tool_name, **tool_input)
+            error = tool_error_message(result)
+            text = json.dumps(result, indent=2, default=str)
+        except Exception as e:  # execute_tool normally returns errors instead of raising
+            error, text = str(e), json.dumps({"error": str(e)})
+        block = {"type": "tool_result", "tool_use_id": tool_id, "content": redact_secrets(text)[:10000]}
+        if error:
+            block["is_error"] = True
+            failed_tools.append(tool_name)
+            tool_status.warning(f"**Failed:** `{tool_name}`: {redact_secrets(error)[:200]}")
+        else:
+            tool_status.success(f"**Completed:** `{tool_name}`")
+        return block
+
     chat_container = st.container()
     with chat_container:
         for message in st.session_state.claude_messages:
@@ -600,37 +686,23 @@ with tab2:
                     "content": user_input
                 })
                 
-                model_name = "claude-3-5-sonnet-20241022"
+                model_name = os.getenv("CLAUDE_MODEL", "claude-opus-5-5")
                 thinking_placeholder.info("**Thinking...** Analyzing your request and planning the best approach.")
-                
-                try:
-                    response = st.session_state.claude_client.messages.create(
-                        model=model_name,
-                        max_tokens=4096,
-                        system=get_system_prompt(),
-                        messages=api_messages,
-                        tools=get_tool_definitions()
-                    )
-                except Exception as model_error:
-                    if "404" in str(model_error) or "not_found" in str(model_error).lower():
-                        status_placeholder.warning(f"Model {model_name} not available. Using fallback model...")
-                        model_name = "claude-3-haiku-20240307"
-                        thinking_placeholder.info("**Thinking...** Analyzing your request with fallback model.")
-                        response = st.session_state.claude_client.messages.create(
-                            model=model_name,
-                            max_tokens=4096,
-                            system=get_system_prompt(),
-                            messages=api_messages,
-                            tools=get_tool_definitions()
-                        )
-                    else:
-                        raise
-                
+
+                response = st.session_state.claude_client.messages.create(
+                    model=model_name,
+                    max_tokens=16000,
+                    system=get_system_prompt(),
+                    messages=api_messages,
+                    tools=get_tool_definitions()
+                )
+
                 thinking_placeholder.empty()
                 
                 assistant_message = {"role": "assistant", "content": "", "tool_calls": [], "status_messages": []}
                 full_response = ""
                 tool_calls_info = []
+                failed_tools = []
                 
                 if response.stop_reason == "tool_use":
                     tool_results = []
@@ -652,14 +724,7 @@ with tab2:
                                 tool_status = st.empty()
                                 tool_status.info(f"**Executing:** `{tool_name}`")
                                 
-                                tool_result = execute_tool(tool_name, **tool_input)
-                                tool_results.append({
-                                    "type": "tool_result",
-                                    "tool_use_id": tool_id,
-                                    "content": json.dumps(tool_result, indent=2, default=str)
-                                })
-                                
-                                tool_status.success(f"**Completed:** `{tool_name}`")
+                                tool_results.append(run_chat_tool(tool_name, tool_input, tool_id, tool_status, failed_tools))
                     
                     if tool_calls_info:
                         tool_calls_placeholder.markdown("---")
@@ -681,8 +746,17 @@ with tab2:
                     
                     max_iterations = 5
                     iteration = 0
-                    current_response = response
-                    
+                    # Round 1's tools already ran above; get Claude's next turn before looping.
+                    thinking_placeholder.info("**Analyzing results...** Synthesizing information.")
+                    current_response = st.session_state.claude_client.messages.create(
+                        model=model_name,
+                        max_tokens=16000,
+                        system=get_system_prompt(),
+                        messages=api_messages,
+                        tools=get_tool_definitions()
+                    )
+                    thinking_placeholder.empty()
+
                     while current_response.stop_reason == "tool_use" and iteration < max_iterations:
                         iteration += 1
                         tool_results = []
@@ -708,14 +782,7 @@ with tab2:
                                     tool_status = st.empty()
                                     tool_status.info(f"**Executing:** `{tool_name}`")
                                     
-                                    tool_result = execute_tool(tool_name, **tool_input)
-                                    tool_results.append({
-                                        "type": "tool_result",
-                                        "tool_use_id": tool_id,
-                                        "content": json.dumps(tool_result, indent=2, default=str)
-                                    })
-                                    
-                                    tool_status.success(f"**Completed:** `{tool_name}`")
+                                    tool_results.append(run_chat_tool(tool_name, tool_input, tool_id, tool_status, failed_tools))
                         
                         if round_tool_calls:
                             tool_calls_placeholder.markdown("---")
@@ -739,7 +806,7 @@ with tab2:
                         thinking_placeholder.info("**Analyzing results...** Synthesizing information.")
                         current_response = st.session_state.claude_client.messages.create(
                             model=model_name,
-                            max_tokens=4096,
+                            max_tokens=16000,
                             system=get_system_prompt(),
                             messages=api_messages,
                             tools=get_tool_definitions()
@@ -761,6 +828,9 @@ with tab2:
                     thinking_placeholder.empty()
                     status_placeholder.empty()
                     
+                    if failed_tools:
+                        names = ", ".join(sorted(set(failed_tools)))
+                        full_response += f"\n\n> ⚠️ Some live lookups failed ({names}), so parts of this answer may be incomplete."
                     response_placeholder.markdown(full_response)
                     assistant_message["content"] = full_response
                 else:
@@ -770,10 +840,9 @@ with tab2:
                 st.session_state.claude_messages.append(assistant_message)
                 
             except Exception as e:
-                error_msg = f"Error: {str(e)}"
+                error_msg = "Sorry, something went wrong while planning that. Please try again."
                 response_placeholder.error(error_msg)
-                import traceback
-                st.code(traceback.format_exc())
+                show_debug_details(e)
                 st.session_state.claude_messages.append({
                     "role": "assistant",
                     "content": error_msg,
@@ -820,7 +889,7 @@ with tab3:
                     )
                     st.json(flight_result)
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error: {safe_error(e)}")
     
     elif server_choice == "Hotel":
         st.subheader("Hotel Search")
@@ -841,7 +910,7 @@ with tab3:
                     )
                     st.json(hotel_result)
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error: {safe_error(e)}")
     
     elif server_choice == "Event":
         st.subheader("Event Search")
@@ -860,7 +929,7 @@ with tab3:
                     )
                     st.json(event_result)
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error: {safe_error(e)}")
     
     elif server_choice == "Geocoder":
         st.subheader("Geocoder")
@@ -873,7 +942,7 @@ with tab3:
                     geo_result = geocode_location(location)
                     st.json(geo_result)
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error: {safe_error(e)}")
     
     elif server_choice == "Weather":
         st.subheader("Weather")
@@ -909,9 +978,8 @@ with tab3:
                         st.success("Current weather retrieved!")
                         st.json(weather_result)
                     except Exception as e:
-                        st.error(f"Error: {e}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                        st.error(f"Error: {safe_error(e)}")
+                        show_debug_details(e)
             
             with col2:
                 if st.form_submit_button("Get Forecast"):
@@ -925,9 +993,8 @@ with tab3:
                         st.success("Weather forecast retrieved!")
                         st.json(weather_result)
                     except Exception as e:
-                        st.error(f"Error: {e}")
-                        import traceback
-                        st.code(traceback.format_exc())
+                        st.error(f"Error: {safe_error(e)}")
+                        show_debug_details(e)
     
     elif server_choice == "Finance":
         st.subheader("Finance")
@@ -946,7 +1013,7 @@ with tab3:
                     )
                     st.json(finance_result)
                 except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.error(f"Error: {safe_error(e)}")
 
 with tab4:
     st.header("Saved Results")

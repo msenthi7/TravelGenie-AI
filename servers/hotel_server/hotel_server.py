@@ -1,6 +1,7 @@
 import requests
 import json
 import os
+import re
 from typing import List, Dict, Optional, Any, Union
 from datetime import datetime, timedelta
 from mcp.server.fastmcp import FastMCP
@@ -8,12 +9,38 @@ from mcp.server.fastmcp import FastMCP
 HOTELS_DIR = "hotels"
 mcp = FastMCP("hotel-assistant")
 
+
+def _safe_json_path(directory: str, name) -> str:
+    """Build <directory>/<name>.json without letting user/model input escape the folder.
+
+    File names come from search inputs (city names, event queries), which the model
+    controls, so characters like "/" or ".." must never reach the filesystem path.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_.,-]", "_", str(name)).lstrip(".")[:150] or "result"
+    path = os.path.join(directory, safe + ".json")
+    if os.path.dirname(os.path.abspath(path)) != os.path.abspath(directory):
+        raise ValueError("Invalid result file name")
+    return path
+
 def get_serpapi_key() -> str:
     """Returns SerpAPI key from environment."""
     api_key = os.getenv("SERPAPI_KEY")
     if not api_key:
         raise ValueError("SERPAPI_KEY environment variable is required")
     return api_key
+
+
+def _safe_error(e: Exception) -> str:
+    """Error text with the API key masked.
+
+    requests puts the full request URL (including ?api_key=...) in its exception
+    messages, and these errors are returned to the model, logged and stored.
+    """
+    text = str(e)
+    key = os.getenv("SERPAPI_KEY")
+    if key:
+        text = text.replace(key, "***")
+    return re.sub(r"(api_key=)[^&\s\"']+", r"\1***", text)
 
 @mcp.tool()
 def search_hotels(
@@ -124,7 +151,7 @@ def search_hotels(
             "serpapi_pagination": hotel_data.get("serpapi_pagination", {})
         }
         
-        file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+        file_path = _safe_json_path(HOTELS_DIR, search_id)
         with open(file_path, "w") as f:
             json.dump(processed_results, f, indent=2)
         
@@ -160,17 +187,17 @@ def search_hotels(
         return summary
         
     except requests.exceptions.RequestException as e:
-        return {"error": f"API request failed: {str(e)}"}
+        return {"error": f"API request failed: {_safe_error(e)}"}
     except ValueError as e:
-        return {"error": str(e)}
+        return {"error": _safe_error(e)}
     except Exception as e:
-        return {"error": f"Unexpected error: {str(e)}"}
+        return {"error": f"Unexpected error: {_safe_error(e)}"}
 
 @mcp.tool()
 def get_hotel_details(search_id: str) -> str:
     """Returns detailed hotel information for a given search ID."""
     
-    file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(HOTELS_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No hotel search found with ID: {search_id}"
@@ -180,7 +207,7 @@ def get_hotel_details(search_id: str) -> str:
             hotel_data = json.load(f)
         return json.dumps(hotel_data, indent=2)
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        return f"Error reading hotel data for {search_id}: {str(e)}"
+        return f"Error reading hotel data for {search_id}: {_safe_error(e)}"
 
 @mcp.tool()
 def get_property_details(
@@ -210,11 +237,11 @@ def get_property_details(
         return json.dumps(property_data, indent=2)
         
     except requests.exceptions.RequestException as e:
-        return f"API request failed: {str(e)}"
+        return f"API request failed: {_safe_error(e)}"
     except ValueError as e:
-        return str(e)
+        return _safe_error(e)
     except Exception as e:
-        return f"Unexpected error: {str(e)}"
+        return f"Unexpected error: {_safe_error(e)}"
 
 @mcp.tool()
 def filter_hotels_by_price(
@@ -224,7 +251,7 @@ def filter_hotels_by_price(
 ) -> str:
     """Filters hotels by price range."""
     
-    file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(HOTELS_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No hotel search found with ID: {search_id}"
@@ -257,7 +284,7 @@ def filter_hotels_by_price(
         return json.dumps(result, indent=2)
         
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        return f"Error processing hotel data for {search_id}: {str(e)}"
+        return f"Error processing hotel data for {search_id}: {_safe_error(e)}"
 
 @mcp.tool()
 def filter_hotels_by_rating(
@@ -266,7 +293,7 @@ def filter_hotels_by_rating(
 ) -> str:
     """Filters hotels by minimum rating."""
     
-    file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(HOTELS_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No hotel search found with ID: {search_id}"
@@ -293,7 +320,7 @@ def filter_hotels_by_rating(
         return json.dumps(result, indent=2)
         
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        return f"Error processing hotel data for {search_id}: {str(e)}"
+        return f"Error processing hotel data for {search_id}: {_safe_error(e)}"
 
 @mcp.tool()
 def filter_hotels_by_amenities(
@@ -311,7 +338,7 @@ def filter_hotels_by_amenities(
         JSON string with filtered hotel results
     """
     
-    file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(HOTELS_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No hotel search found with ID: {search_id}"
@@ -339,7 +366,7 @@ def filter_hotels_by_amenities(
         return json.dumps(result, indent=2)
         
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        return f"Error processing hotel data for {search_id}: {str(e)}"
+        return f"Error processing hotel data for {search_id}: {_safe_error(e)}"
 
 @mcp.tool()
 def filter_hotels_by_class(
@@ -357,7 +384,7 @@ def filter_hotels_by_class(
         JSON string with filtered hotel results
     """
     
-    file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(HOTELS_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"No hotel search found with ID: {search_id}"
@@ -384,7 +411,7 @@ def filter_hotels_by_class(
         return json.dumps(result, indent=2)
         
     except (FileNotFoundError, json.JSONDecodeError) as e:
-        return f"Error processing hotel data for {search_id}: {str(e)}"
+        return f"Error processing hotel data for {search_id}: {_safe_error(e)}"
 
 @mcp.resource("hotels://searches")
 def get_hotel_searches() -> str:
@@ -445,7 +472,7 @@ def get_hotel_search_details(search_id: str) -> str:
     Args:
         search_id: The hotel search ID to retrieve details for
     """
-    file_path = os.path.join(HOTELS_DIR, f"{search_id}.json")
+    file_path = _safe_json_path(HOTELS_DIR, search_id)
     
     if not os.path.exists(file_path):
         return f"# Hotel Search Not Found: {search_id}\n\nNo hotel search found with this ID."
