@@ -85,7 +85,7 @@ def search_flights(
         elif trip_type == 1 and not return_date:
             return {"error": "Return date is required for round trip flights"}
         
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         flight_data = response.json()

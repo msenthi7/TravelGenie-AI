@@ -24,7 +24,7 @@ ratelimiter>=1.2.0.post0
 typing-extensions>=4.13.2
 
 # Traffic & Crowd server dependencies
-opencv-python>=4.8.0
+opencv-python>=4.8.0,<5  # OpenCV 5 drops cv2.HOGDescriptor used by the people detector
 numpy>=1.24.0
 yt-dlp>=2023.12.30
 

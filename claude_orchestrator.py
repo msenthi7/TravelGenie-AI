@@ -48,7 +48,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "calculate_distance",
-            "description": "Calculate the straight-line distance between two places. Accepts place names (geocoded automatically) or 'lat,lon' coordinates.",
+            "description": "Calculate the straight-line (as-the-crow-flies) distance between two places. It is NOT road distance or travel time: driving distance is usually 20-40% longer; say so if you mention it. Accepts place names (geocoded automatically) or 'lat,lon' coordinates.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -242,7 +242,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "analyze_location_traffic",
-            "description": "Get real-time traffic and crowd data for a specific location. Returns vehicle traffic, foot traffic, and crowd density information to help plan optimal visit times.",
+            "description": "ESTIMATE ONLY, not live data: returns a generic traffic and crowd level from a time-of-day template (the same for every location). Use only for rough 'typically busy vs quiet' guidance and always present it as a typical-pattern estimate, never as current or real-time conditions.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -286,7 +286,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "get_traffic_patterns",
-            "description": "Get historical traffic patterns for a location to understand peak hours, best visit times, and traffic trends.",
+            "description": "ESTIMATE ONLY, not real historical data: returns generic rush-hour patterns (the same for every location). Present results as typical patterns, never as measured data for this place.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -314,7 +314,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "compare_location_traffic",
-            "description": "Compare traffic and crowd data across multiple locations to help users choose the best location or time to visit.",
+            "description": "ESTIMATE ONLY, not live data: compares generic time-of-day traffic templates across locations (results are nearly identical everywhere). Only city/town names work, not street names. Present as rough typical patterns.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -490,7 +490,21 @@ def _with_daily_forecast(result: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
+
+SIMULATED_TOOLS = {"analyze_location_traffic", "get_traffic_patterns", "compare_location_traffic"}
+SIMULATED_NOTE = ("Simulated estimate from a generic time-of-day template, not live or measured data. "
+                  "Present it only as a typical pattern.")
+
+
 def execute_tool(tool_name: str, **kwargs) -> Dict[str, Any]:
+    """Run a tool; mark results from simulated tools so they are never presented as real data."""
+    result = _execute_tool(tool_name, **kwargs)
+    if tool_name in SIMULATED_TOOLS and isinstance(result, dict) and not result.get("error"):
+        result = {"is_estimate": True, "data_source": SIMULATED_NOTE, **result}
+    return result
+
+
+def _execute_tool(tool_name: str, **kwargs) -> Dict[str, Any]:
     """Executes a tool function by name with the given parameters."""
     try:
         if tool_name == "geocode_location":
@@ -685,7 +699,7 @@ Your capabilities include:
 - Getting weather forecasts to help plan activities
 - Converting currencies for international travel
 - Geocoding locations and calculating distances
-- Analyzing real-time traffic and crowd conditions at locations
+- Estimating typical (not live) traffic and crowd patterns from a generic time-of-day model
 - Analyzing video frames for crowd, vehicle, and foot traffic detection
 - Analyzing YouTube videos and live streams for real-time location analysis
 - Getting traffic patterns to identify best visit times
@@ -695,14 +709,14 @@ When a user asks about travel planning:
 2. Use geocoding to get coordinates for locations (needed for weather and distances)
 3. Search for flights, hotels, and events based on the user's requirements
 4. Get weather forecasts to suggest appropriate activities
-5. Analyze traffic and crowd conditions at destinations to recommend optimal visit times
+5. Optionally use the traffic estimate tools for typical busy/quiet times, clearly labeled as estimates (they are not live data)
 6. Convert all costs to the user's preferred currency
 7. Synthesize all information into a comprehensive travel plan with:
    - Flight recommendations with prices
    - Hotel recommendations with prices per night
    - Day-by-day itinerary based on weather, traffic, and interests
    - Event and activity suggestions with optimal visit times
-   - Traffic and crowd analysis for popular locations
+   - Typical busy/quiet times, labeled as estimates
    - Budget breakdown in the requested currency
    - Distance and travel time information
 

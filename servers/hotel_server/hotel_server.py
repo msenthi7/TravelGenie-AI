@@ -111,7 +111,7 @@ def search_hotels(
         if bedrooms is not None:
             params["bedrooms"] = bedrooms
         
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         hotel_data = response.json()
@@ -230,7 +230,7 @@ def get_property_details(
             "hl": language
         }
         
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         property_data = response.json()

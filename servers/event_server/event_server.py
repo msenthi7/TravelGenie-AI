@@ -99,7 +99,7 @@ def search_events(
             params["htichips"] = ",".join(filters)
         
         # Make API request
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         event_data = response.json()

@@ -86,7 +86,7 @@ def lookup_stock(
             params["window"] = window.upper()
         
         # Make API request
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         stock_data = response.json()
@@ -183,7 +183,7 @@ def convert_currency(
         }
         
         # Make API request
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         currency_data = response.json()
@@ -231,6 +231,10 @@ def convert_currency(
                             exchange_rate = currency_pair.get("price", 0)
                             break
         
+        if not exchange_rate:
+            # A missing rate must not look like "converts to 0".
+            return {"error": f"Could not find an exchange rate for {query}.", "search_id": search_id}
+
         converted_amount = amount * exchange_rate
         
         return {
@@ -275,7 +279,7 @@ def get_market_overview(language: str = "en") -> Dict[str, Any]:
         }
         
         # Make API request
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         market_data = response.json()
@@ -459,7 +463,7 @@ def get_historical_data(
         }
         
         # Make API request
-        response = requests.get("https://serpapi.com/search", params=params)
+        response = requests.get("https://serpapi.com/search", params=params, timeout=20)
         response.raise_for_status()
         
         historical_data = response.json()
