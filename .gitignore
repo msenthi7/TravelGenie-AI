@@ -172,3 +172,5 @@ finance/
 weather_data/
 geocoded_locations/
 traffic_crowd_data/
+# Model weights: downloaded on first use and verified by SHA-256 (see vision.py)
+models/

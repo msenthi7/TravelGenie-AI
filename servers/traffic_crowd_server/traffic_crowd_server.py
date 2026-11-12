@@ -40,6 +40,11 @@ try:
 except ImportError:
     YT_DLP_AVAILABLE = False
 
+try:
+    from servers.traffic_crowd_server import vision
+except ImportError:  # running main.py from inside this folder
+    import vision
+
 TRAFFIC_CROWD_DIR = "traffic_crowd_data"
 mcp = FastMCP("traffic-crowd-assistant")
 
@@ -139,137 +144,13 @@ def analyze_video_frame(frame_data: str, frame_type: str = "base64") -> Dict[str
         if frame is None:
             return {"error": "Failed to load image frame"}
         
-        # Get frame dimensions
         height, width = frame.shape[:2]
-        total_pixels = height * width
-        
-        # Convert to grayscale for processing
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        # Initialize analysis results
         analysis = {
             "frame_dimensions": {"width": width, "height": height},
-            "total_pixels": total_pixels,
-            "timestamp": datetime.now().isoformat()
+            "timestamp": datetime.now().isoformat(),
+            # One still image has no camera baseline, so no busy/quiet judgement is made.
+            "measurement": vision.analyze_frames([frame]),
         }
-        
-        # Crowd density estimation using blob detection
-        # This is a simplified approach - in production, you'd use more sophisticated models
-        params = cv2.SimpleBlobDetector_Params()
-        params.filterByArea = True
-        params.minArea = 100
-        params.maxArea = 5000
-        params.filterByCircularity = False
-        params.filterByConvexity = False
-        params.filterByInertia = False
-        
-        detector = cv2.SimpleBlobDetector_create(params)
-        keypoints = detector.detect(gray)
-        
-        # Estimate crowd density
-        blob_count = len(keypoints)
-        density_percentage = (blob_count / 100.0) * 100  # Normalized estimate
-        density_level = "Low"
-        if density_percentage > 70:
-            density_level = "Very High"
-        elif density_percentage > 50:
-            density_level = "High"
-        elif density_percentage > 30:
-            density_level = "Medium"
-        
-        analysis["crowd_analysis"] = {
-            "detected_blobs": blob_count,
-            "estimated_density_percentage": min(density_percentage, 100),
-            "crowd_level": density_level,
-            "keypoints_detected": blob_count
-        }
-        
-        # Vehicle detection using edge detection and contour analysis
-        # Apply Gaussian blur
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-        
-        # Canny edge detection
-        edges = cv2.Canny(blurred, 50, 150)
-        
-        # Find contours
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Filter contours by size (vehicles are typically larger)
-        vehicle_contours = [c for c in contours if cv2.contourArea(c) > 500]
-        vehicle_count = len(vehicle_contours)
-        
-        # Estimate traffic density
-        traffic_percentage = (vehicle_count / 50.0) * 100  # Normalized estimate
-        traffic_level = "Low"
-        if traffic_percentage > 70:
-            traffic_level = "Heavy"
-        elif traffic_percentage > 50:
-            traffic_level = "Moderate"
-        elif traffic_percentage > 30:
-            traffic_level = "Light"
-        
-        analysis["vehicle_analysis"] = {
-            "detected_vehicles": vehicle_count,
-            "estimated_traffic_percentage": min(traffic_percentage, 100),
-            "traffic_level": traffic_level,
-            "contours_detected": len(contours)
-        }
-        
-        # Foot traffic estimation (pedestrian detection)
-        # Using HOG (Histogram of Oriented Gradients) descriptor
-        # This is a simplified version - production would use trained models
-        hog = cv2.HOGDescriptor()
-        hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-        
-        # Resize frame for faster processing if too large
-        scale_factor = 1.0
-        if width > 800:
-            scale_factor = 800 / width
-            frame_resized = cv2.resize(frame, (int(width * scale_factor), int(height * scale_factor)))
-        else:
-            frame_resized = frame
-        
-        # Detect pedestrians
-        boxes, weights = hog.detectMultiScale(frame_resized, winStride=(8, 8), padding=(32, 32), scale=1.05)
-        
-        pedestrian_count = len(boxes)
-        foot_traffic_percentage = (pedestrian_count / 20.0) * 100  # Normalized estimate
-        foot_traffic_level = "Low"
-        if foot_traffic_percentage > 70:
-            foot_traffic_level = "Very High"
-        elif foot_traffic_percentage > 50:
-            foot_traffic_level = "High"
-        elif foot_traffic_percentage > 30:
-            foot_traffic_level = "Medium"
-        
-        analysis["foot_traffic_analysis"] = {
-            "detected_pedestrians": pedestrian_count,
-            "estimated_foot_traffic_percentage": min(foot_traffic_percentage, 100),
-            "foot_traffic_level": foot_traffic_level,
-            "pedestrian_boxes": len(boxes)
-        }
-        
-        # Overall location activity score
-        activity_score = (
-            analysis["crowd_analysis"]["estimated_density_percentage"] * 0.4 +
-            analysis["vehicle_analysis"]["estimated_traffic_percentage"] * 0.3 +
-            analysis["foot_traffic_analysis"]["estimated_foot_traffic_percentage"] * 0.3
-        )
-        
-        activity_level = "Quiet"
-        if activity_score > 70:
-            activity_level = "Very Busy"
-        elif activity_score > 50:
-            activity_level = "Busy"
-        elif activity_score > 30:
-            activity_level = "Moderate"
-        
-        analysis["overall_activity"] = {
-            "activity_score": round(activity_score, 2),
-            "activity_level": activity_level,
-            "recommendation": "Consider visiting during off-peak hours" if activity_score > 70 else "Good time to visit"
-        }
-        
         return analysis
         
     except Exception as e:
@@ -473,10 +354,7 @@ def analyze_video_frame_realtime(
             "search_id": search_id,
             "analysis_timestamp": analysis.get("timestamp"),
             "frame_dimensions": analysis.get("frame_dimensions"),
-            "crowd_analysis": analysis.get("crowd_analysis"),
-            "vehicle_analysis": analysis.get("vehicle_analysis"),
-            "foot_traffic_analysis": analysis.get("foot_traffic_analysis"),
-            "overall_activity": analysis.get("overall_activity")
+            "measurement": analysis.get("measurement"),
         }
         
         if "location_context" in analysis:
@@ -594,7 +472,7 @@ def analyze_youtube_video(
         frame_skip = int(fps * frame_interval) if fps > 0 else 30
         
         # Sample and analyze frames
-        frame_analyses = []
+        raw_frames = []
         frames_analyzed = 0
         current_frame = 0
         
@@ -607,19 +485,8 @@ def analyze_youtube_video(
             
             # Sample frames at intervals
             if current_frame % frame_skip == 0:
-                # Analyze this frame
-                # Convert frame to base64 for analysis
-                _, buffer = cv2.imencode('.jpg', frame)
-                frame_base64 = base64.b64encode(buffer).decode('utf-8')
-                
-                # Analyze the frame
-                frame_analysis = analyze_video_frame(frame_base64, "base64")
-                
-                if "error" not in frame_analysis:
-                    frame_analysis["frame_number"] = current_frame
-                    frame_analysis["timestamp_seconds"] = current_frame / fps if fps > 0 else 0
-                    frame_analyses.append(frame_analysis)
-                    frames_analyzed += 1
+                raw_frames.append(frame)
+                frames_analyzed += 1
             
             current_frame += 1
             
@@ -629,91 +496,25 @@ def analyze_youtube_video(
         
         cap.release()
         
-        if not frame_analyses:
-            return {"error": "Could not analyze any frames from the video. The video may be too short or unavailable."}
+        if not raw_frames:
+            return {"error": "Could not read any frames from the video. The stream may be offline."}
         
-        # Aggregate analysis results
-        crowd_densities = [fa.get("crowd_analysis", {}).get("estimated_density_percentage", 0) for fa in frame_analyses]
-        vehicle_traffic = [fa.get("vehicle_analysis", {}).get("estimated_traffic_percentage", 0) for fa in frame_analyses]
-        foot_traffic = [fa.get("foot_traffic_analysis", {}).get("estimated_foot_traffic_percentage", 0) for fa in frame_analyses]
-        activity_scores = [fa.get("overall_activity", {}).get("activity_score", 0) for fa in frame_analyses]
+        # Detector + per-camera baseline + confidence (see vision.py)
+        measurement = vision.analyze_frames(raw_frames, cam=vision.camera_id(youtube_url))
         
-        # Calculate averages
-        avg_crowd_density = sum(crowd_densities) / len(crowd_densities) if crowd_densities else 0
-        avg_vehicle_traffic = sum(vehicle_traffic) / len(vehicle_traffic) if vehicle_traffic else 0
-        avg_foot_traffic = sum(foot_traffic) / len(foot_traffic) if foot_traffic else 0
-        avg_activity_score = sum(activity_scores) / len(activity_scores) if activity_scores else 0
-        
-        # Determine overall levels
-        crowd_level = "Low"
-        if avg_crowd_density > 70:
-            crowd_level = "Very High"
-        elif avg_crowd_density > 50:
-            crowd_level = "High"
-        elif avg_crowd_density > 30:
-            crowd_level = "Medium"
-        
-        traffic_level = "Low"
-        if avg_vehicle_traffic > 70:
-            traffic_level = "Heavy"
-        elif avg_vehicle_traffic > 50:
-            traffic_level = "Moderate"
-        elif avg_vehicle_traffic > 30:
-            traffic_level = "Light"
-        
-        activity_level = "Quiet"
-        if avg_activity_score > 70:
-            activity_level = "Very Busy"
-        elif avg_activity_score > 50:
-            activity_level = "Busy"
-        elif avg_activity_score > 30:
-            activity_level = "Moderate"
-        
-        # Compile results
         analysis_result = {
             "search_metadata": {
                 "search_id": search_id,
                 "youtube_url": youtube_url,
                 "location": location,
                 "frames_analyzed": frames_analyzed,
-                "sample_frames": sample_frames,
                 "frame_interval_seconds": frame_interval,
-                "analysis_timestamp": datetime.now().isoformat()
+                "analysis_timestamp_utc": datetime.utcnow().isoformat(timespec="seconds"),
             },
             "video_info": video_info,
-            "video_properties": {
-                "fps": fps,
-                "total_frames": total_frames,
-                "width": width,
-                "height": height,
-                "is_live": video_info.get("is_live", False)
-            },
-            "aggregated_analysis": {
-                "crowd_analysis": {
-                    "average_density_percentage": round(avg_crowd_density, 2),
-                    "crowd_level": crowd_level,
-                    "min_density": round(min(crowd_densities), 2) if crowd_densities else 0,
-                    "max_density": round(max(crowd_densities), 2) if crowd_densities else 0
-                },
-                "vehicle_analysis": {
-                    "average_traffic_percentage": round(avg_vehicle_traffic, 2),
-                    "traffic_level": traffic_level,
-                    "min_traffic": round(min(vehicle_traffic), 2) if vehicle_traffic else 0,
-                    "max_traffic": round(max(vehicle_traffic), 2) if vehicle_traffic else 0
-                },
-                "foot_traffic_analysis": {
-                    "average_foot_traffic_percentage": round(avg_foot_traffic, 2),
-                    "foot_traffic_level": "Low" if avg_foot_traffic < 30 else "Medium" if avg_foot_traffic < 50 else "High" if avg_foot_traffic < 70 else "Very High",
-                    "min_foot_traffic": round(min(foot_traffic), 2) if foot_traffic else 0,
-                    "max_foot_traffic": round(max(foot_traffic), 2) if foot_traffic else 0
-                },
-                "overall_activity": {
-                    "average_activity_score": round(avg_activity_score, 2),
-                    "activity_level": activity_level,
-                    "recommendation": "Very crowded - consider visiting during off-peak hours" if avg_activity_score > 70 else "Moderately busy - good time to visit" if avg_activity_score > 30 else "Quiet location - excellent time to visit"
-                }
-            },
-            "frame_analyses": frame_analyses
+            "video_properties": {"fps": fps, "width": width, "height": height,
+                                 "is_live": video_info.get("is_live", False)},
+            "measurement": measurement,
         }
         
         # Add location context if provided
@@ -724,10 +525,21 @@ def analyze_youtube_video(
                     "name": location_info.get("name", location),
                     "country": location_info.get("country", "Unknown"),
                     "latitude": lat,
-                    "longitude": lon
+                    "longitude": lon,
+                    # The place's clock, not the server's: 9 pm in Tokyo is not 9 pm in Virginia.
+                    "local_time": vision.local_time(lat, lon),
                 }
-            except:
+            except Exception:
                 analysis_result["location_context"] = {"name": location}
+                # Landmarks ("Shibuya Crossing") often fail; the area name still gives the timezone.
+                words = location.split()
+                for n in range(len(words) - 1, 0, -1):
+                    try:
+                        lat, lon, _ = geocode_location(" ".join(words[:n]))
+                        analysis_result["location_context"]["local_time"] = vision.local_time(lat, lon)
+                        break
+                    except Exception:
+                        continue
         
         # Save analysis
         file_path = _safe_json_path(TRAFFIC_CROWD_DIR, search_id)
@@ -743,8 +555,7 @@ def analyze_youtube_video(
             "video_title": video_info.get("title", "Unknown"),
             "is_live": video_info.get("is_live", False),
             "frames_analyzed": frames_analyzed,
-            "aggregated_analysis": analysis_result["aggregated_analysis"],
-            "analysis_timestamp": datetime.now().isoformat()
+            "measurement": measurement,
         }
         
         if "location_context" in analysis_result:

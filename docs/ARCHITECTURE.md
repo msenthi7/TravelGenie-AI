@@ -2,7 +2,7 @@
 
 TravelGenie is an AI travel planner. A user asks for a trip in Slack or a web app. Claude (Anthropic's model) decides which tools to call: flights, hotels, events, weather, currency, geocoding, traffic and video analysis. The code runs those tools, sends the results back, and Claude writes the itinerary.
 
-This document covers how the system is built, how a request moves through it, and the design decisions behind it. The security analysis is in [SECURITY_ASSESSMENT.md](SECURITY_ASSESSMENT.md).
+This document covers how the system is built, how a request moves through it, and the design decisions behind it. The security analysis is in [SECURITY_ASSESSMENT.md](SECURITY_ASSESSMENT.md). The live crowd-check design (YOLO, per-camera baselines, confidence) is in [COMPUTER_VISION.md](COMPUTER_VISION.md).
 
 ---
 
@@ -86,9 +86,9 @@ Key loop rules:
 | `analyze_location_traffic` | Time-of-day template | ❌ **Simulated** | Same values for every location; tagged `is_estimate: true` |
 | `get_traffic_patterns` | Generic rush-hour template | ❌ **Simulated** | Tagged as an estimate |
 | `compare_location_traffic` | Simulated template per location | ❌ **Simulated** | Tagged as an estimate |
-| `analyze_video_frame_realtime` | OpenCV on a provided image | ✅ (rough) | Classic CV: HOG people detector, blob and contour heuristics |
+| `analyze_video_frame_realtime` | YOLOv8n on a provided image | ✅ | People and vehicle counts with confidence (HOG fallback if YOLO can't load) |
 | `analyze_youtube_video` | yt-dlp + OpenCV on a YouTube stream | ✅ (rough) | Samples N frames from live streams. Host allow-list: youtube.com and youtu.be only |
-| `check_live_conditions` | YouTube live search (yt-dlp) + the CV above | ✅ (rough) | "How busy is X right now?" Finds up to 2 live cams whose title names the place, analyzes 3 frames, 45s hard timeout. Measured: Times Square 5.4s, Banff 4.7s, Shibuya 6.1s; Reston → no cam (says so) |
+| `check_live_conditions` | YouTube live search (yt-dlp) + YOLOv8n | ✅ | "How busy is X right now?" Finds up to 2 live cams whose title names the place, counts people and vehicles in 3 frames, scores them against **that camera's own range**, reports the **place's local time** and a **confidence with reasons**. 45s hard timeout; 5–8s measured. Reston → no cam (says so). Details: [COMPUTER_VISION.md](COMPUTER_VISION.md) |
 
 **Why the labels matter:** a model passes on whatever tools tell it. The simulated tools used to be described as "real-time", so the model presented made-up traffic as fact. They're now described and tagged as estimates, so the model says "typically busy", never "currently busy".
 

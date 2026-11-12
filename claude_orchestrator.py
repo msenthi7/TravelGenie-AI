@@ -337,7 +337,7 @@ def get_tool_definitions() -> List[Dict[str, Any]]:
         },
         {
             "name": "check_live_conditions",
-            "description": "See how busy a place looks RIGHT NOW: finds a public YouTube live webcam for the place and runs computer-vision crowd/foot-traffic/vehicle detection on a few frames. Use only when the user asks about current or live conditions (e.g. 'how crowded is Times Square right now?'), not for normal trip planning. Takes about 10-30 seconds. Results are rough estimates from classic computer vision on one camera view; always name the camera and share its link. Many small towns have no live cam; if none is found, say so.",
+            "description": "See how busy a place looks RIGHT NOW: finds a public YouTube live webcam for the place and counts people and vehicles in a few frames with a YOLOv8n object detector, compares the count to that camera's own normal range, and reports a confidence level. Use only when the user asks about current or live conditions (e.g. 'how crowded is Times Square right now?'), not for normal trip planning. Takes about 10-30 seconds. Results cover one camera view only; always name the camera, share its link, and state the confidence. Many small towns have no live cam; if none is found, say so.",
             "input_schema": {
                 "type": "object",
                 "properties": {
@@ -530,9 +530,13 @@ def _check_live_conditions(place: Any) -> Dict[str, Any]:
                 return {"place": found["place"], "live_cam_found": True,
                         "camera": {"title": cam["title"], "url": cam["url"], "channel": cam["channel"]},
                         "frames_analyzed": result.get("frames_analyzed"),
-                        "analysis": result.get("aggregated_analysis"),
-                        "accuracy_note": "Rough estimate from classic computer vision (OpenCV HOG people "
-                                         "detector, blob and contour counts) on one camera view."}
+                        "local_time_at_place": (result.get("location_context") or {}).get("local_time"),
+                        "measurement": result.get("measurement"),
+                        "how_to_report": "Give the people/vehicle counts and the level relative to this "
+                                         "camera's normal range. If the level is 'calibrating', say the "
+                                         "camera has no baseline yet and give counts only. Always state "
+                                         "the confidence level and its reasons, and use the place's local "
+                                         "time, not the user's."}
             last_error = result["error"]
         return {"error": f"Found live cams but could not read them: {last_error}"}
 

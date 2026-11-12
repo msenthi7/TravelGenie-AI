@@ -7,7 +7,11 @@ WORKDIR /app
 COPY requirements.txt .
 
 # Install the specified packages
+# CPU-only PyTorch first (the default Linux wheel bundles ~2 GB of CUDA we don't use).
+# --index-url, not --extra-index-url: with an extra index, pip may take a same-named package
+# from whichever index has the higher version (dependency confusion).
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch torchvision && \
     pip install --no-cache-dir -r requirements.txt
 
 COPY slack_bot.py .
@@ -15,6 +19,10 @@ COPY streamlit_app.py .
 COPY claude_orchestrator.py .
 COPY dynamodb_database.py .
 COPY servers/ ./servers/
+
+# Fetch the YOLO weights at build time and verify their SHA-256, so the running container
+# never downloads code-bearing files (.pt weights are pickles) and needs less egress.
+RUN python -c "from servers.traffic_crowd_server import vision as v; assert v.detector_name() == 'YOLOv8n', v._model_error"
 
 # Run as an unprivileged user: a compromise of the app (e.g. via a malicious tool
 # result or dependency) must not get root inside the container. The app writes

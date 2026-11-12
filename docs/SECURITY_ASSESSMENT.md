@@ -2,7 +2,7 @@
 
 **Scope:** the whole application: Slack bot, Streamlit web app, Claude orchestration layer, 7 tool servers, local persistence, Docker image, and AWS CloudFormation infrastructure.
 **Method:** manual code review, threat modeling (STRIDE plus the OWASP Top 10 for LLM Applications 2025), static analysis (Bandit), dependency audit (pip-audit), IaC lint (cfn-lint), git history secret scan, and live testing against real APIs.
-**Outcome:** 20 findings (3 High, one of them fixed just before this assessment; 8 Medium; 8 Low; 1 Informational). All are fixed in code except one action outside the code: revoking a key exposed in git history. Remaining risks are listed in §7.
+**Outcome:** 22 findings (3 High, one of them fixed just before this assessment; 9 Medium; 9 Low; 1 Informational). All are fixed in code except one action outside the code: revoking a key exposed in git history. Remaining risks are listed in §7.
 
 Architecture context: [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -94,6 +94,8 @@ Severity is a qualitative rating (impact × likelihood for this deployment). Com
 | F-17 | No scope guardrail: bot answered off-topic requests (cost and abuse) | Low | LLM06, LLM10 | Travel-only scope rule; tested: off-topic request declined in 1.4s with no tool calls | 29f316d |
 | F-18 | Currency conversion returned **0** as a successful result when the rate was missing | Low | CWE-754 | Missing rate → explicit error (fail closed) | e371029 |
 | F-19 | Model had no current date → searched past dates → wasted paid calls and retries | Low | LLM09 | Date injected into the system prompt per request + server-side date validation | 29f316d |
+| F-21 | **ML supply chain:** adding a YOLO detector means loading `.pt` weights (Python pickles that can run code) from the internet, from a package with a real compromise history (ultralytics 8.3.41/42, Dec 2024) | Medium | CWE-494, CWE-502 · LLM03 | Weights pinned by SHA-256 and verified before load (fail closed to HOG); `ultralytics==8.4.211` pinned exactly; Docker fetches and verifies at build; torch via `--index-url` (no dependency confusion); update checks and analytics off | this release |
+| F-22 | **Untrustworthy CV presented as measurement:** blob/contour "crowd %" and server-clock time; "0 people" on a far-away camera read as "quiet" | Low | LLM09 | YOLOv8n detector; busyness relative to each camera's own range; place's local time; confidence with reasons; lower-bound flag ([COMPUTER_VISION.md](COMPUTER_VISION.md)) | this release |
 | F-20 | Chat DB and raw API results not git-ignored (personal data and leaked keys one `git add .` away from a public repo) | Medium | CWE-538 | `*.db`, result folders added to `.gitignore` | 29f316d |
 
 ### Spotlight: F-02, the key leak through error messages
@@ -121,6 +123,7 @@ Severity is a qualitative rating (impact × likelihood for this deployment). Com
 | Errors | Generic user messages; redacted logs; debug-only tracebacks | bot, web app |
 | Data | Parameterized SQL (no string-built queries); KMS encryption + PITR on DynamoDB; S3 KMS + versioning + public access block | bot DB, CFN |
 | Infra | Non-root container; no inbound ports (Socket Mode); egress 443 only; least-privilege IAM scoped to table, bucket and log ARNs | Dockerfile, CFN |
+| ML models | SHA-256-pinned weights, exact package pin, build-time fetch, no telemetry | `vision.py`, `requirements.txt`, Dockerfile |
 | Pipeline | CI: Bandit (fails on medium+), pip-audit, Gitleaks, cfn-lint | `.github/workflows/security.yml` |
 
 ## 7. Residual risks and next steps
@@ -134,7 +137,7 @@ Severity is a qualitative rating (impact × likelihood for this deployment). Com
 | Personal data retention | Chat history kept indefinitely, unencrypted at rest locally | Retention TTL (DynamoDB TTL), local encryption, a privacy notice |
 | Secrets passed as CFN parameters | Values flow through stack parameters (`NoEcho` hides them, but they're still parameters) | Create secrets out-of-band; reference by ARN |
 | Untrusted media parsing | yt-dlp and ffmpeg/OpenCV parse attacker-influenced streams | Run CV in a separate sandboxed task with no credentials |
-| Classic CV accuracy | HOG/contour heuristics give rough counts | Modern detector (e.g. YOLO); report confidence |
+| CV accuracy on far-away cameras | YOLOv8n misses people a few pixels tall (flagged as a lower bound, low confidence) | Density-map crowd counting (CSRNet) for dense scenes; hourly sampler to build per-hour baselines; labeled test set to measure error |
 | Simulated traffic tools | No real traffic data source | Integrate a real traffic API, or remove the tools |
 
 ## 8. How this was verified
@@ -145,6 +148,7 @@ Severity is a qualitative rating (impact × likelihood for this deployment). Com
 | pip-audit (SCA) | 0 known vulnerabilities in pinned requirements |
 | cfn-lint (IaC) | 0 errors (7 pre-existing style warnings) |
 | Git history secret scan | 1 hard-coded key found (F-01) |
+| CV pipeline | Tampered weights refused (HOG fallback); dark frame → low confidence; far camera → lower-bound flag; local time correct for Tokyo |
 | Unit and live tests | Key masking with a fake key; path traversal (`../../etc/passwd` stays in the folder); SSRF URL rejected; rate limit (6th request blocked); dedupe; input cap; timeout → clean error; zero currency rate → error; off-topic refusal; full live trip plan with 0 tool failures |
 
 ## 9. Reporting a vulnerability
