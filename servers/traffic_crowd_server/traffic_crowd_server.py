@@ -524,8 +524,13 @@ def analyze_youtube_video(
         import cv2
         
         # Validate YouTube URL
-        if "youtube.com" not in youtube_url and "youtu.be" not in youtube_url:
-            return {"error": "Invalid YouTube URL. Please provide a valid YouTube video URL."}
+        # Check the actual host, not a substring: "https://evil.example/?youtube.com" must be
+        # rejected, or the server could be made to fetch arbitrary URLs (SSRF).
+        from urllib.parse import urlparse
+        parsed = urlparse(youtube_url.strip())
+        allowed_hosts = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+        if parsed.scheme not in ("http", "https") or (parsed.hostname or "").lower() not in allowed_hosts:
+            return {"error": "Invalid YouTube URL. Please provide a youtube.com or youtu.be link."}
         
         # Create search identifier
         search_id = f"youtube_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
@@ -535,7 +540,9 @@ def analyze_youtube_video(
         
         # Configure yt-dlp options
         ydl_opts = {
-            'format': 'best[height<=720]',  # Get best quality up to 720p for faster processing
+            # Live streams only offer video-only HLS formats, so plain "best" (audio+video) fails.
+            # We only need frames: prefer a video-only stream up to 720p, then fall back.
+            'format': 'bestvideo[height<=720]/best[height<=720]/best',
             'quiet': True,
             'no_warnings': True,
         }
